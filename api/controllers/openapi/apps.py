@@ -178,9 +178,9 @@ class AppListApi(Resource):
             return PaginationEnvelope[AppListRow].build(page=1, limit=0, total=0, items=[]).model_dump(mode="json"), 200
 
         try:
-            query = AppListQuery.model_validate(dict(request.args))
-        except ValidationError as e:
-            raise UnprocessableEntity(str(e.errors()))
+            query = AppListQuery.model_validate(request.args.to_dict(flat=True))
+        except ValidationError as exc:
+            raise UnprocessableEntity(exc.json())
 
         workspace_id = query.workspace_id
         require_workspace_member(ctx, workspace_id)

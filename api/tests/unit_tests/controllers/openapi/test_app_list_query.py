@@ -13,10 +13,11 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from controllers.openapi._models import MAX_PAGE_LIMIT
+from controllers.openapi.apps import AppListQuery
+
 
 def test_defaults():
-    from controllers.openapi.apps import AppListQuery
-
     q = AppListQuery.model_validate({"workspace_id": "ws-1"})
     assert q.workspace_id == "ws-1"
     assert q.page == 1
@@ -27,15 +28,11 @@ def test_defaults():
 
 
 def test_workspace_id_required():
-    from controllers.openapi.apps import AppListQuery
-
     with pytest.raises(ValidationError):
         AppListQuery.model_validate({})
 
 
 def test_page_must_be_positive():
-    from controllers.openapi.apps import AppListQuery
-
     with pytest.raises(ValidationError):
         AppListQuery.model_validate({"workspace_id": "ws-1", "page": 0})
     with pytest.raises(ValidationError):
@@ -43,15 +40,11 @@ def test_page_must_be_positive():
 
 
 def test_page_rejects_non_integer_string():
-    from controllers.openapi.apps import AppListQuery
-
     with pytest.raises(ValidationError):
         AppListQuery.model_validate({"workspace_id": "ws-1", "page": "abc"})
 
 
 def test_limit_must_be_positive():
-    from controllers.openapi.apps import AppListQuery
-
     with pytest.raises(ValidationError):
         AppListQuery.model_validate({"workspace_id": "ws-1", "limit": 0})
     with pytest.raises(ValidationError):
@@ -59,9 +52,6 @@ def test_limit_must_be_positive():
 
 
 def test_limit_caps_at_max_page_limit():
-    from controllers.openapi._models import MAX_PAGE_LIMIT
-    from controllers.openapi.apps import AppListQuery
-
     # Boundary accepts.
     q = AppListQuery.model_validate({"workspace_id": "ws-1", "limit": MAX_PAGE_LIMIT})
     assert q.limit == MAX_PAGE_LIMIT
@@ -72,8 +62,6 @@ def test_limit_caps_at_max_page_limit():
 
 
 def test_mode_whitelisted_against_app_mode():
-    from controllers.openapi.apps import AppListQuery
-
     # Valid mode passes.
     q = AppListQuery.model_validate({"workspace_id": "ws-1", "mode": "chat"})
     assert q.mode is not None
@@ -85,16 +73,33 @@ def test_mode_whitelisted_against_app_mode():
 
 
 def test_name_length_capped():
-    from controllers.openapi.apps import AppListQuery
-
     AppListQuery.model_validate({"workspace_id": "ws-1", "name": "x" * 200})
     with pytest.raises(ValidationError):
         AppListQuery.model_validate({"workspace_id": "ws-1", "name": "x" * 201})
 
 
 def test_tag_length_capped():
-    from controllers.openapi.apps import AppListQuery
-
     AppListQuery.model_validate({"workspace_id": "ws-1", "tag": "x" * 100})
     with pytest.raises(ValidationError):
         AppListQuery.model_validate({"workspace_id": "ws-1", "tag": "x" * 101})
+
+
+def test_all_fields_accept_valid_values():
+    """Pin the happy-path acceptance for every field in one place."""
+    q = AppListQuery.model_validate(
+        {
+            "workspace_id": "ws-1",
+            "page": 5,
+            "limit": 50,
+            "mode": "workflow",
+            "name": "search",
+            "tag": "prod",
+        }
+    )
+    assert q.workspace_id == "ws-1"
+    assert q.page == 5
+    assert q.limit == 50
+    assert q.mode is not None
+    assert q.mode.value == "workflow"
+    assert q.name == "search"
+    assert q.tag == "prod"
