@@ -52,11 +52,12 @@ def test_max_page_limit_is_200():
 
 
 def test_envelope_uses_pep695_generics():
-    """Verify the class accepts type parameter via PEP 695 syntax —
-    i.e., model_fields surfaces the generic-parameterized data list."""
+    """Verify the class uses PEP 695 native generic syntax (not legacy Generic[T])."""
     from controllers.openapi._models import PaginationEnvelope
 
-    Parameterized = PaginationEnvelope[dict]
+    # PEP 695 syntax populates __type_params__; the legacy Generic[T] form does not.
+    assert PaginationEnvelope.__type_params__, "expected PEP 695 native generic syntax"
+
     fields = PaginationEnvelope.model_fields
     assert {"page", "limit", "total", "has_more", "data"} <= set(fields)
 
