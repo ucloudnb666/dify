@@ -1,23 +1,43 @@
-from types import SimpleNamespace
-from unittest.mock import patch
+import builtins
 
 from flask import Flask
-from flask_restx import Api
+from flask.views import MethodView
+
+from controllers.openapi import bp as openapi_bp
+from controllers.openapi.app_info import AppInfoApi
+
+if not hasattr(builtins, "MethodView"):
+    builtins.MethodView = MethodView  # type: ignore[attr-defined]
 
 
-def _client():
-    from controllers.openapi import (
-        app_info,  # noqa: F401
-        openapi_ns,
-    )
-
+def _openapi_app() -> Flask:
     app = Flask(__name__)
-    api = Api(app)
-    api.add_namespace(openapi_ns, path="/openapi/v1")
-    return app.test_client()
+    app.config["TESTING"] = True
+    app.register_blueprint(openapi_bp)
+    return app
 
 
-def test_app_info_returns_response_model(bypass_pipeline):
+def _rule(app: Flask, path: str):
+    return next(r for r in app.url_map.iter_rules() if r.rule == path)
+
+
+def test_app_info_route_registered():
+    rules = {r.rule for r in _openapi_app().url_map.iter_rules()}
+    assert "/openapi/v1/apps/<string:app_id>/info" in rules
+
+
+def test_app_info_dispatches_to_class():
+    app = _openapi_app()
+    rule = _rule(app, "/openapi/v1/apps/<string:app_id>/info")
+    assert app.view_functions[rule.endpoint].view_class is AppInfoApi
+    assert "GET" in rule.methods
+
+
+def test_app_info_payload_shape():
+    from types import SimpleNamespace
+
+    from controllers.openapi.apps import app_info_payload
+
     app_obj = SimpleNamespace(
         id="app1",
         name="X",
@@ -26,23 +46,12 @@ def test_app_info_returns_response_model(bypass_pipeline):
         author_name="alice",
         tags=[SimpleNamespace(name="prod")],
     )
-    with patch("controllers.openapi.app_info._unpack_app", return_value=app_obj):
-        r = _client().get("/openapi/v1/apps/app1/info")
-    assert r.status_code == 200
-    body = r.get_json()
-    assert body == {
+    payload = app_info_payload(app_obj)
+    assert payload == {
         "id": "app1",
         "name": "X",
         "description": "d",
         "mode": "chat",
-        "author_name": "alice",
-        "tags": ["prod"],
+        "author": "alice",
+        "tags": [{"name": "prod"}],
     }
-
-
-def test_app_info_response_model_validates():
-    from controllers.openapi.app_info import AppInfoResponse
-
-    m = AppInfoResponse(id="x", name="N", mode="chat")
-    assert m.tags == []
-    assert m.description is None

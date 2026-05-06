@@ -99,6 +99,8 @@ def test_subject_match_for_account_filters_by_account_id():
         token_id=_uuid.uuid4(),
         source="oauth_account",
         expires_at=None,
+        token_hash="h1",
+        verified_tenants={},
     )
     clauses = _subject_match(ctx)
     # One predicate, on account_id
@@ -125,6 +127,8 @@ def test_subject_match_for_external_sso_filters_by_email_and_issuer():
         token_id=_uuid.uuid4(),
         source="oauth_external_sso",
         expires_at=None,
+        token_hash="h1",
+        verified_tenants={},
     )
     clauses = _subject_match(ctx)
     assert len(clauses) == 3

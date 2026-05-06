@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from flask import g
+from flask import g, request
 from flask_restx import Resource
 from sqlalchemy import and_, select, update
 from werkzeug.exceptions import BadRequest, NotFound
 
 from controllers.openapi import openapi_ns
+from controllers.openapi._models import PaginationEnvelope
 from extensions.ext_database import db
 from extensions.ext_redis import redis_client
 from libs.oauth_bearer import (
@@ -82,7 +83,10 @@ class AccountSessionsApi(Resource):
     def get(self):
         ctx = g.auth_ctx
         now = datetime.now(UTC)
-        rows = db.session.execute(
+        page = int(request.args.get("page", "1"))
+        limit = min(int(request.args.get("limit", "100")), 200)
+
+        all_rows = db.session.execute(
             select(
                 OAuthAccessToken.id,
                 OAuthAccessToken.prefix,
@@ -103,20 +107,26 @@ class AccountSessionsApi(Resource):
             .order_by(OAuthAccessToken.created_at.desc())
         ).all()
 
-        return {
-            "sessions": [
-                {
-                    "id": str(r.id),
-                    "prefix": r.prefix,
-                    "client_id": r.client_id,
-                    "device_label": r.device_label,
-                    "created_at": _iso(r.created_at),
-                    "last_used_at": _iso(r.last_used_at),
-                    "expires_at": _iso(r.expires_at),
-                }
-                for r in rows
-            ]
-        }, 200
+        total = len(all_rows)
+        sliced = all_rows[(page - 1) * limit : page * limit]
+
+        items = [
+            {
+                "id": str(r.id),
+                "prefix": r.prefix,
+                "client_id": r.client_id,
+                "device_label": r.device_label,
+                "created_at": _iso(r.created_at),
+                "last_used_at": _iso(r.last_used_at),
+                "expires_at": _iso(r.expires_at),
+            }
+            for r in sliced
+        ]
+
+        return (
+            PaginationEnvelope.build(page=page, limit=limit, total=total, items=items).model_dump(mode="json"),
+            200,
+        )
 
 
 @openapi_ns.route("/account/sessions/<string:session_id>")
