@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 from pydantic import BaseModel
 
-T = TypeVar("T")
+# Server-side cap on `limit` query param for any /openapi/v1/* list endpoint.
+# Sibling endpoints (`/apps`, `/account/sessions`, future routes) all clamp to
+# this; do not introduce per-endpoint caps without raising the constant.
+MAX_PAGE_LIMIT = 200
 
 
 class UsageInfo(BaseModel):
@@ -20,7 +23,7 @@ class MessageMetadata(BaseModel):
     retriever_resources: list[dict[str, Any]] = []
 
 
-class PaginationEnvelope(BaseModel, Generic[T]):  # noqa: UP046
+class PaginationEnvelope[T](BaseModel):
     """Canonical pagination envelope for `/openapi/v1/*` list endpoints."""
 
     page: int
@@ -32,3 +35,32 @@ class PaginationEnvelope(BaseModel, Generic[T]):  # noqa: UP046
     @classmethod
     def build(cls, *, page: int, limit: int, total: int, items: list[T]) -> PaginationEnvelope[T]:
         return cls(page=page, limit=limit, total=total, has_more=page * limit < total, data=items)
+
+
+class AppListRow(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    mode: str
+    tags: list[dict[str, str]] = []
+    updated_at: str | None = None
+    created_by_name: str | None = None
+
+
+class AppInfoResponse(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    mode: str
+    author: str | None = None
+    tags: list[dict[str, str]] = []
+
+
+class AppDescribeInfo(AppInfoResponse):
+    updated_at: str | None = None
+    service_api_enabled: bool
+
+
+class AppDescribeResponse(BaseModel):
+    info: AppDescribeInfo
+    parameters: dict[str, Any]
