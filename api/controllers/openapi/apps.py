@@ -15,7 +15,8 @@ from typing import Any, cast
 import sqlalchemy as sa
 from flask import g, request
 from flask_restx import Resource
-from werkzeug.exceptions import BadRequest, NotFound
+from pydantic import BaseModel, Field, ValidationError
+from werkzeug.exceptions import NotFound, UnprocessableEntity
 
 from controllers.common.fields import Parameters
 from controllers.openapi import openapi_ns
@@ -149,6 +150,22 @@ class AppDescribeApi(AppReadResource):
         return AppDescribeResponse(info=info, parameters=parameters).model_dump(mode="json"), 200
 
 
+class AppListQuery(BaseModel):
+    """Query-param validator for `GET /openapi/v1/apps`.
+
+    `mode` is a closed set (AppMode) — invalid values surface as 422
+    instead of returning silently-empty data. `workspace_id` is required;
+    page / limit have numeric bounds; name / tag have length caps.
+    """
+
+    workspace_id: str
+    page: int = Field(1, ge=1)
+    limit: int = Field(20, ge=1, le=MAX_PAGE_LIMIT)
+    mode: AppMode | None = None
+    name: str | None = Field(None, max_length=200)
+    tag: str | None = Field(None, max_length=100)
+
+
 @openapi_ns.route("/apps")
 class AppListApi(Resource):
     method_decorators = _APPS_READ_DECORATORS
@@ -160,18 +177,19 @@ class AppListApi(Resource):
             # (dfoe_ lacks apps:read). Defensive guard for future scope shifts.
             return PaginationEnvelope[AppListRow].build(page=1, limit=0, total=0, items=[]).model_dump(mode="json"), 200
 
-        workspace_id = request.args.get("workspace_id")
-        if not workspace_id:
-            raise BadRequest("workspace_id query param is required")
+        try:
+            query = AppListQuery.model_validate(dict(request.args))
+        except ValidationError as e:
+            raise UnprocessableEntity(str(e.errors()))
 
+        workspace_id = query.workspace_id
         require_workspace_member(ctx, workspace_id)
 
-        # NOTE: ad-hoc int(...) parsing below — Task 3 swaps this for AppListQuery.
-        page = int(request.args.get("page", "1"))
-        limit = min(int(request.args.get("limit", "20")), MAX_PAGE_LIMIT)
-        mode = request.args.get("mode")
-        name_filter = request.args.get("name")
-        tag_name = request.args.get("tag")
+        page = query.page
+        limit = query.limit
+        mode = query.mode.value if query.mode else None
+        name_filter = query.name
+        tag_name = query.tag
 
         filters = [
             App.tenant_id == workspace_id,
