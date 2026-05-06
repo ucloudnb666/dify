@@ -1,8 +1,9 @@
 """GET /openapi/v1/apps and per-app reads (single, parameters, describe).
 
-Read endpoints attach via `_AppReadResource`, which stacks
-`validate_bearer + require_scope` as method_decorators (Flask-RESTX runs
-them in reverse order, so validate_bearer wraps the outside).
+Read endpoints attach via `AppReadResource`, which stacks
+`validate_bearer + require_scope` as method_decorators. List order is
+innermost-first: `validate_bearer` is last in the list and ends up
+outermost, so it sets `g.auth_ctx` before `require_scope` reads it.
 The OAuth bearer pipeline is reserved for /run (which gates on
 webapp_auth ACL).
 """
@@ -42,6 +43,14 @@ from libs.oauth_bearer import (
 from models import App
 from models.model import AppMode, Tag, TagBinding
 
+# Shared decorator stack for `apps:read`-scoped endpoints. List order is
+# innermost-first; `validate_bearer` (last) wraps outermost so it sets
+# `g.auth_ctx` before `require_scope` reads it.
+_APPS_READ_DECORATORS = [
+    require_scope(Scope.APPS_READ),
+    validate_bearer(accept=ACCEPT_USER_ANY),
+]
+
 _EMPTY_PARAMETERS: dict[str, Any] = {
     "opening_statement": None,
     "suggested_questions": [],
@@ -51,15 +60,12 @@ _EMPTY_PARAMETERS: dict[str, Any] = {
 }
 
 
-class _AppReadResource(Resource):
+class AppReadResource(Resource):
     """Base for `/apps/<id>` read endpoints. Stacks bearer auth + scope check
     on every method, then exposes `_load()` so subclasses don't repeat the
     SSO-guard / app-load / membership-check ritual."""
 
-    method_decorators = [
-        require_scope(Scope.APPS_READ),
-        validate_bearer(accept=ACCEPT_USER_ANY),
-    ]
+    method_decorators = _APPS_READ_DECORATORS
 
     def _load(self, app_id: str) -> tuple[App, AuthContext]:
         ctx = g.auth_ctx
@@ -108,21 +114,21 @@ def parameters_payload(app: App) -> dict:
 
 
 @openapi_ns.route("/apps/<string:app_id>")
-class AppByIdApi(_AppReadResource):
+class AppByIdApi(AppReadResource):
     def get(self, app_id: str):
         app, _ = self._load(app_id)
         return app_info_payload(app), 200
 
 
 @openapi_ns.route("/apps/<string:app_id>/parameters")
-class AppParametersApi(_AppReadResource):
+class AppParametersApi(AppReadResource):
     def get(self, app_id: str):
         app, _ = self._load(app_id)
         return parameters_payload(app), 200
 
 
 @openapi_ns.route("/apps/<string:app_id>/describe")
-class AppDescribeApi(_AppReadResource):
+class AppDescribeApi(AppReadResource):
     def get(self, app_id: str):
         app, _ = self._load(app_id)
         try:
@@ -145,10 +151,7 @@ class AppDescribeApi(_AppReadResource):
 
 @openapi_ns.route("/apps")
 class AppListApi(Resource):
-    method_decorators = [
-        require_scope(Scope.APPS_READ),
-        validate_bearer(accept=ACCEPT_USER_ANY),
-    ]
+    method_decorators = _APPS_READ_DECORATORS
 
     def get(self):
         ctx = g.auth_ctx
