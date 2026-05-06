@@ -908,6 +908,12 @@ class AuthConfig(BaseSettings):
         default=True,
     )
 
+    OPENAPI_RATE_LIMIT_PER_TOKEN: PositiveInt = Field(
+        description="Per-token rate limit on /openapi/v1/* (requests per minute). "
+        "Bucket keyed on sha256(token), shared across api replicas via Redis.",
+        default=60,
+    )
+
 
 class ModerationConfig(BaseSettings):
     """

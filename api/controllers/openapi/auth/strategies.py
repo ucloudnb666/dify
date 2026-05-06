@@ -7,6 +7,7 @@ composition stays a flat list.
 
 from __future__ import annotations
 
+import uuid
 from typing import Protocol
 
 from flask import current_app
@@ -38,7 +39,7 @@ class AclStrategy:
             return False
         return EnterpriseService.WebAppAuth.is_user_allowed_to_access_webapp(
             user_id=ctx.subject_email,
-            app_id=ctx.app.id,  # type: ignore[attr-defined]
+            app_id=ctx.app.id,
         )
 
 
@@ -55,10 +56,10 @@ class MembershipStrategy:
             return False
         if ctx.tenant is None:
             return False
-        return _has_tenant_membership(ctx.account_id, ctx.tenant.id)  # type: ignore[attr-defined]
+        return _has_tenant_membership(ctx.account_id, ctx.tenant.id)
 
 
-def _has_tenant_membership(account_id: str | None, tenant_id: str) -> bool:
+def _has_tenant_membership(account_id: uuid.UUID | str | None, tenant_id: str) -> bool:
     if not account_id:
         return False
     row = db.session.execute(
@@ -92,7 +93,7 @@ class AccountMounter:
         account = db.session.get(Account, ctx.account_id)
         if account is None:
             raise RuntimeError("AccountMounter: account row missing for resolved bearer")
-        account.current_tenant = ctx.tenant  # type: ignore[assignment]
+        account.current_tenant = ctx.tenant
         _login_as(account)
         ctx.caller, ctx.caller_kind = account, "account"
 
@@ -106,8 +107,8 @@ class EndUserMounter:
             raise RuntimeError("EndUserMounter: tenant/app/subject_email unset — earlier steps did not run")
         end_user = EndUserService.get_or_create_end_user_by_type(
             InvokeFrom.OPENAPI,
-            tenant_id=ctx.tenant.id,  # type: ignore[attr-defined]
-            app_id=ctx.app.id,  # type: ignore[attr-defined]
+            tenant_id=ctx.tenant.id,
+            app_id=ctx.app.id,
             user_id=ctx.subject_email,
         )
         _login_as(end_user)

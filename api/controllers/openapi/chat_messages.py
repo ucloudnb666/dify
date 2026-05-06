@@ -3,7 +3,7 @@ service_api/app/completion.py:ChatApi.
 
 Differences from service_api:
 - App is in URL path, not header.
-- One decorator: @APP_PIPELINE.guard(scope="apps:run").
+- One decorator: @OAUTH_BEARER_PIPELINE.guard(scope=Scope.APPS_RUN).
 - Request body has no `user` field (Model 2: identity is the bearer).
 - Typed Request and Response models.
 - invoke_from = InvokeFrom.OPENAPI.
@@ -25,7 +25,7 @@ import services
 from controllers.openapi import openapi_ns
 from controllers.openapi._audit import emit_app_run
 from controllers.openapi._models import MessageMetadata
-from controllers.openapi.auth.composition import APP_PIPELINE
+from controllers.openapi.auth.composition import OAUTH_BEARER_PIPELINE
 from controllers.service_api.app.error import (
     AppUnavailableError,
     CompletionRequestError,
@@ -45,6 +45,7 @@ from core.errors.error import (
 from graphon.model_runtime.errors.invoke import InvokeError
 from libs import helper
 from libs.helper import UUIDStrOrEmpty
+from libs.oauth_bearer import Scope
 from models.model import App, AppMode
 from services.app_generate_service import AppGenerateService
 from services.errors.app import (
@@ -101,7 +102,7 @@ def _unpack_caller(caller):
 
 @openapi_ns.route("/apps/<string:app_id>/chat-messages")
 class ChatMessagesApi(Resource):
-    @APP_PIPELINE.guard(scope="apps:run")
+    @OAUTH_BEARER_PIPELINE.guard(scope=Scope.APPS_RUN)
     def post(self, app_id: str, app_model: App, caller, caller_kind: str):
         app = _unpack_app(app_model)
         if AppMode.value_of(app.mode) not in {

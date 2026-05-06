@@ -12,8 +12,8 @@ from flask import Flask, g
 from werkzeug.exceptions import Forbidden
 
 from libs.oauth_bearer import (
-    SCOPE_FULL,
     AuthContext,
+    Scope,
     SubjectType,
     require_scope,
 )
@@ -26,7 +26,7 @@ def app() -> Flask:
     return app
 
 
-def _ctx(scopes: frozenset[str]) -> AuthContext:
+def _ctx(scopes) -> AuthContext:
     return AuthContext(
         subject_type=SubjectType.ACCOUNT,
         subject_email="user@example.com",
@@ -36,6 +36,8 @@ def _ctx(scopes: frozenset[str]) -> AuthContext:
         token_id=uuid.uuid4(),
         source="oauth_account",
         expires_at=None,
+        token_hash="h1",
+        verified_tenants={},
     )
 
 
@@ -67,7 +69,7 @@ def test_require_scope_full_passes_any_check(app: Flask):
         return "ok"
 
     with app.test_request_context():
-        g.auth_ctx = _ctx(frozenset({SCOPE_FULL}))
+        g.auth_ctx = _ctx(frozenset({Scope.FULL}))
         assert view() == "ok"
 
 

@@ -1,7 +1,7 @@
 """Pipeline steps. Each is one responsibility.
 
-BearerCheck is the only step that touches the token registry; downstream
-steps see only the populated Context.
+`BearerCheck` is the only step that touches the token registry; downstream
+steps see only the populated `Context`.
 """
 
 from __future__ import annotations
@@ -10,62 +10,52 @@ from collections.abc import Callable
 
 from werkzeug.exceptions import BadRequest, Forbidden, NotFound, Unauthorized
 
+from configs import dify_config
 from controllers.openapi.auth.context import Context
 from controllers.openapi.auth.strategies import AppAuthzStrategy, CallerMounter
 from extensions.ext_database import db
-from libs.oauth_bearer import TokenExpiredError, get_authenticator, sha256_hex
+from libs.oauth_bearer import (
+    InvalidBearerError,
+    Scope,
+    SubjectType,
+    _extract_bearer,  # type: ignore[attr-defined]
+    check_workspace_membership,
+    get_authenticator,
+)
 from models import App, Tenant, TenantStatus
 
 
-def _registry():
-    return get_authenticator().registry
-
-
-def _extract_bearer(req) -> str | None:
-    auth = req.headers.get("Authorization")
-    if not auth or not auth.lower().startswith("bearer "):
-        return None
-    return auth.split(None, 1)[1].strip() or None
-
-
-def _hash_token(token: str) -> str:
-    return sha256_hex(token)
-
-
 class BearerCheck:
-    """Resolve bearer → populate identity fields."""
+    """Resolve bearer → populate identity fields. Rate-limit is enforced
+    inside `BearerAuthenticator.authenticate`, so no separate step here."""
 
     def __call__(self, ctx: Context) -> None:
         token = _extract_bearer(ctx.request)
         if not token:
             raise Unauthorized("bearer required")
 
-        kind = _registry().find(token)
-        if kind is None:
-            raise Unauthorized("invalid bearer prefix")
-
         try:
-            row = kind.resolver.resolve(_hash_token(token))
-        except TokenExpiredError:
-            raise Unauthorized("token expired")
-        if row is None:
-            raise Unauthorized("invalid bearer")
+            authn = get_authenticator().authenticate(token)
+        except InvalidBearerError as e:
+            raise Unauthorized(str(e))
 
-        ctx.subject_type = kind.subject_type
-        ctx.subject_email = row.subject_email
-        ctx.subject_issuer = row.subject_issuer
-        ctx.account_id = row.account_id
-        ctx.scopes = kind.scopes
-        ctx.source = kind.source
-        ctx.token_id = row.token_id
-        ctx.expires_at = row.expires_at
+        ctx.subject_type = authn.subject_type
+        ctx.subject_email = authn.subject_email
+        ctx.subject_issuer = authn.subject_issuer
+        ctx.account_id = authn.account_id
+        ctx.scopes = frozenset(authn.scopes)
+        ctx.source = authn.source
+        ctx.token_id = authn.token_id
+        ctx.expires_at = authn.expires_at
+        ctx.token_hash = authn.token_hash
+        ctx.cached_verified_tenants = dict(authn.verified_tenants)
 
 
 class ScopeCheck:
     """Verify ctx.scopes (already populated by BearerCheck) covers required."""
 
     def __call__(self, ctx: Context) -> None:
-        if "full" in ctx.scopes or ctx.required_scope in ctx.scopes:
+        if Scope.FULL in ctx.scopes or ctx.required_scope in ctx.scopes:
             return
         raise Forbidden("insufficient_scope")
 
@@ -73,8 +63,9 @@ class ScopeCheck:
 class AppResolver:
     """Read app_id from request.view_args, populate ctx.app + ctx.tenant.
 
-    Every endpoint using APP_PIPELINE must declare ``<string:app_id>`` in
-    its route — that is the design lock-in (no body / header coupling).
+    Every endpoint using the OAuth bearer pipeline must declare
+    ``<string:app_id>`` in its route — that is the design lock-in (no body /
+    header coupling).
     """
 
     def __call__(self, ctx: Context) -> None:
@@ -90,6 +81,31 @@ class AppResolver:
         if tenant is None or tenant.status == TenantStatus.ARCHIVE:
             raise Forbidden("workspace unavailable")
         ctx.app, ctx.tenant = app, tenant
+
+
+class WorkspaceMembershipCheck:
+    """Layer 0 — workspace membership gate.
+
+    CE-only (skipped when ENTERPRISE_ENABLED). Account-subject bearers
+    (dfoa_) only — SSO subjects skip.
+    """
+
+    def __call__(self, ctx: Context) -> None:
+        if dify_config.ENTERPRISE_ENABLED:
+            return
+        if ctx.subject_type != SubjectType.ACCOUNT:
+            return
+        if ctx.account_id is None or ctx.tenant is None:
+            raise Unauthorized("account_id or tenant unset — BearerCheck or AppResolver did not run")
+        if ctx.token_hash is None:
+            raise Unauthorized("token_hash unset — BearerCheck did not run")
+
+        check_workspace_membership(
+            account_id=ctx.account_id,
+            tenant_id=ctx.tenant.id,
+            token_hash=ctx.token_hash,
+            cached_verdicts=ctx.cached_verified_tenants or {},
+        )
 
 
 class AppAuthzCheck:

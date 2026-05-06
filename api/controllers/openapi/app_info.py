@@ -2,36 +2,34 @@
 
 from __future__ import annotations
 
+from flask import g
 from flask_restx import Resource
-from pydantic import BaseModel
+from werkzeug.exceptions import NotFound
 
 from controllers.openapi import openapi_ns
-from controllers.openapi.auth.composition import APP_PIPELINE
-
-
-class AppInfoResponse(BaseModel):
-    id: str
-    name: str
-    description: str | None = None
-    mode: str
-    author_name: str | None = None
-    tags: list[str] = []
-
-
-def _unpack_app(app_model):
-    return app_model
+from controllers.openapi.apps import account_or_404, app_info_payload
+from extensions.ext_database import db
+from libs.oauth_bearer import (
+    ACCEPT_USER_ANY,
+    Scope,
+    require_scope,
+    require_workspace_member,
+    validate_bearer,
+)
+from models import App
 
 
 @openapi_ns.route("/apps/<string:app_id>/info")
 class AppInfoApi(Resource):
-    @APP_PIPELINE.guard(scope="apps:run")
-    def get(self, app_id, app_model, caller, caller_kind):
-        app = _unpack_app(app_model)
-        return AppInfoResponse(
-            id=app.id,
-            name=app.name,
-            description=app.description,
-            mode=app.mode,
-            author_name=app.author_name,
-            tags=[t.name for t in app.tags],
-        ).model_dump(mode="json")
+    @validate_bearer(accept=ACCEPT_USER_ANY)
+    @require_scope(Scope.APPS_READ)  # type: ignore[reportUntypedFunctionDecorator]
+    def get(self, app_id: str):
+        ctx = g.auth_ctx
+        account_or_404(ctx)
+
+        app = db.session.get(App, app_id)
+        if not app or app.status != "normal":
+            raise NotFound("app not found")
+
+        require_workspace_member(ctx, str(app.tenant_id))
+        return app_info_payload(app), 200

@@ -12,19 +12,22 @@ import json
 import logging
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from functools import wraps
 from typing import Literal, ParamSpec, Protocol, TypeVar
 
 from flask import g, request
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 from werkzeug.exceptions import Forbidden, ServiceUnavailable, Unauthorized
 
 from configs import dify_config
-from models import OAuthAccessToken
+from extensions.ext_database import db
+from extensions.ext_redis import redis_client
+from libs.rate_limit import enforce_bearer_rate_limit
+from models import Account, OAuthAccessToken, TenantAccountJoin
 
 logger = logging.getLogger(__name__)
 
@@ -39,20 +42,54 @@ class SubjectType(StrEnum):
     EXTERNAL_SSO = "external_sso"
 
 
+class Scope(StrEnum):
+    """Catalog of bearer scopes recognised by the openapi surface.
+
+    `FULL` is the catch-all carried by `dfoa_` account tokens — it satisfies
+    any per-route `require_scope`. `dfoe_` tokens carry the per-feature scopes
+    (`APPS_RUN` today).
+    """
+
+    FULL = "full"
+    APPS_READ = "apps:read"
+    APPS_RUN = "apps:run"
+
+
+class Accepts(StrEnum):
+    """Subject types a route is willing to accept as caller."""
+
+    USER_ACCOUNT = "user_account"
+    USER_EXT_SSO = "user_ext_sso"
+
+
+ACCEPT_USER_ANY: frozenset[Accepts] = frozenset({Accepts.USER_ACCOUNT, Accepts.USER_EXT_SSO})
+
+_SUBJECT_TO_ACCEPT: dict[SubjectType, Accepts] = {
+    SubjectType.ACCOUNT: Accepts.USER_ACCOUNT,
+    SubjectType.EXTERNAL_SSO: Accepts.USER_EXT_SSO,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class AuthContext:
     """Attached to ``g.auth_ctx``. ``scopes`` / ``subject_type`` / ``source``
     come from the TokenKind, not the DB — corrupt rows can't elevate scope.
+
+    `verified_tenants` is a snapshot of the Layer-0 verdict cache at
+    authenticate time. Per-request mutations write through to Redis via
+    `record_layer0_verdict`; this snapshot is not updated in place (frozen).
     """
 
     subject_type: SubjectType
     subject_email: str | None
     subject_issuer: str | None
     account_id: uuid.UUID | None
-    scopes: frozenset[str]
+    scopes: frozenset[Scope]
     token_id: uuid.UUID
     source: str
     expires_at: datetime | None
+    token_hash: str
+    verified_tenants: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +99,47 @@ class ResolvedRow:
     account_id: uuid.UUID | None
     token_id: uuid.UUID
     expires_at: datetime | None
+    verified_tenants: dict[str, bool] = field(default_factory=dict)
+
+    def to_cache(self) -> dict:
+        return {
+            "subject_email": self.subject_email,
+            "subject_issuer": self.subject_issuer,
+            "account_id": str(self.account_id) if self.account_id else None,
+            "token_id": str(self.token_id),
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "verified_tenants": dict(self.verified_tenants),
+        }
+
+    @classmethod
+    def from_cache(cls, data: dict) -> ResolvedRow:
+        return cls(
+            subject_email=data["subject_email"],
+            subject_issuer=data["subject_issuer"],
+            account_id=uuid.UUID(data["account_id"]) if data["account_id"] else None,
+            token_id=uuid.UUID(data["token_id"]),
+            expires_at=datetime.fromisoformat(data["expires_at"]) if data["expires_at"] else None,
+            verified_tenants=_coerce_verified_tenants(data.get("verified_tenants")),
+        )
+
+
+def _coerce_verified_tenants(raw: object) -> dict[str, bool]:
+    """Tolerate legacy entries that stored 'ok'/'denied' string verdicts.
+
+    TODO(post-v1.0): remove once the AuthContext cache TTL has fully cycled
+    on all live deployments (60s TTL → safe to drop one release after rollout).
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, bool] = {}
+    for k, v in raw.items():
+        if isinstance(v, bool):
+            out[k] = v
+        elif v == "ok":
+            out[k] = True
+        elif v == "denied":
+            out[k] = False
+    return out
 
 
 class Resolver(Protocol):
@@ -73,7 +151,7 @@ class Resolver(Protocol):
 class TokenKind:
     prefix: str
     subject_type: SubjectType
-    scopes: frozenset[str]
+    scopes: frozenset[Scope]
     source: str
     resolver: Resolver
 
@@ -129,12 +207,20 @@ class BearerAuthenticator:
         return self._registry
 
     def authenticate(self, token: str) -> AuthContext:
+        """Identity + per-token rate limit (single source).
+
+        Both the openapi pipeline (`BearerCheck`) and the decorator
+        (`validate_bearer`) call this — rate-limit fires exactly once per
+        request regardless of which path hosts the route.
+        """
         kind = self._registry.find(token)
         if kind is None:
             raise InvalidBearerError("unknown token prefix")
-        row = kind.resolver.resolve(sha256_hex(token))
+        token_hash = sha256_hex(token)
+        row = kind.resolver.resolve(token_hash)
         if row is None:
             raise InvalidBearerError("token unknown or revoked")
+        enforce_bearer_rate_limit(token_hash)
         return AuthContext(
             subject_type=kind.subject_type,
             subject_email=row.subject_email,
@@ -144,6 +230,8 @@ class BearerAuthenticator:
             token_id=row.token_id,
             source=kind.source,
             expires_at=row.expires_at,
+            token_hash=token_hash,
+            verified_tenants=dict(row.verified_tenants),
         )
 
 
@@ -171,8 +259,6 @@ class OAuthAccessTokenResolver:
         positive_ttl: int = POSITIVE_TTL_SECONDS,
         negative_ttl: int = NEGATIVE_TTL_SECONDS,
     ) -> None:
-        # session_factory and the cache helpers below are friend-API for
-        # _VariantResolver in this module — kept public-named on purpose.
         self.session_factory = session_factory
         self._redis = redis_client
         self._positive_ttl = positive_ttl
@@ -195,8 +281,7 @@ class OAuthAccessTokenResolver:
         if text == "invalid":
             return "invalid"
         try:
-            data = json.loads(text)
-            return _row_from_cache(data)
+            return ResolvedRow.from_cache(json.loads(text))
         except (ValueError, KeyError):
             logger.warning("auth:token cache entry malformed; treating as miss")
             return None
@@ -205,7 +290,7 @@ class OAuthAccessTokenResolver:
         self._redis.setex(
             self._cache_key(token_hash),
             self._positive_ttl,
-            json.dumps(_row_to_cache(row)),
+            json.dumps(row.to_cache()),
         )
 
     def cache_set_negative(self, token_hash: str) -> None:
@@ -213,7 +298,7 @@ class OAuthAccessTokenResolver:
 
     def hard_expire(self, session: Session, row_id: uuid.UUID | str, token_hash: str) -> None:
         """Atomic CAS — only the worker that flips revoked_at emits audit;
-        replays are idempotent. Spec: tokens.md §Detection + hard-expire.
+        replays are idempotent.
         """
         stmt = (
             update(OAuthAccessToken)
@@ -247,8 +332,8 @@ class _VariantResolver:
                 return None
             return cached
 
-        # session_factory returns Flask-SQLAlchemy's scoped_session, which is
-        # request-bound and not a context manager; use it directly.
+        # Flask-SQLAlchemy's scoped_session is request-bound and not a
+        # context manager; use it directly.
         session = self._parent.session_factory()
         row = self._load_from_db(session, token_hash)
         if row is None:
@@ -301,43 +386,93 @@ class _VariantResolver:
         )
 
 
-def _row_to_cache(row: ResolvedRow) -> dict:
-    return {
-        "subject_email": row.subject_email,
-        "subject_issuer": row.subject_issuer,
-        "account_id": str(row.account_id) if row.account_id else None,
-        "token_id": str(row.token_id),
-        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
-    }
+# ============================================================================
+# Layer 0 — workspace membership cache + helper
+# ============================================================================
 
 
-def _row_from_cache(data: dict) -> ResolvedRow:
-    return ResolvedRow(
-        subject_email=data["subject_email"],
-        subject_issuer=data["subject_issuer"],
-        account_id=uuid.UUID(data["account_id"]) if data["account_id"] else None,
-        token_id=uuid.UUID(data["token_id"]),
-        expires_at=datetime.fromisoformat(data["expires_at"]) if data["expires_at"] else None,
+def record_layer0_verdict(token_hash: str, tenant_id: str, verdict: bool) -> None:
+    """Merge a Layer-0 membership verdict into the AuthContext cache entry at
+    `auth:token:{hash}`. No-op if entry missing/expired/invalid — next request
+    rebuilds via authenticate() and re-runs Layer 0.
+    """
+    cache_key = TOKEN_CACHE_KEY_FMT.format(hash=token_hash)
+    raw = redis_client.get(cache_key)
+    if raw is None:
+        return
+    text = raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
+    if text == "invalid":
+        return
+    try:
+        data = json.loads(text)
+    except (ValueError, KeyError):
+        return
+    ttl = redis_client.ttl(cache_key)
+    if ttl <= 0:
+        return
+    data.setdefault("verified_tenants", {})[tenant_id] = verdict
+    redis_client.setex(cache_key, ttl, json.dumps(data))
+
+
+def check_workspace_membership(
+    *,
+    account_id: uuid.UUID | str,
+    tenant_id: str,
+    token_hash: str,
+    cached_verdicts: dict[str, bool],
+) -> None:
+    """Layer-0 enforcement core. Raises `Forbidden` on deny, returns on allow.
+
+    Shared by the pipeline step (`WorkspaceMembershipCheck`) and the
+    inline helper (`require_workspace_member`). Caller is responsible for
+    short-circuiting on EE / SSO subjects before invoking — this function
+    runs the membership + active-status checks unconditionally.
+    """
+    cached = cached_verdicts.get(tenant_id)
+    if cached is True:
+        return
+    if cached is False:
+        raise Forbidden("workspace_membership_revoked")
+
+    join = db.session.execute(
+        select(TenantAccountJoin.id).where(
+            TenantAccountJoin.account_id == account_id,
+            TenantAccountJoin.tenant_id == tenant_id,
+        )
+    ).scalar_one_or_none()
+    if join is None:
+        record_layer0_verdict(token_hash, tenant_id, False)
+        raise Forbidden("workspace_membership_revoked")
+
+    status = db.session.execute(select(Account.status).where(Account.id == account_id)).scalar_one_or_none()
+    if status != "active":
+        record_layer0_verdict(token_hash, tenant_id, False)
+        raise Forbidden("workspace_membership_revoked")
+
+    record_layer0_verdict(token_hash, tenant_id, True)
+
+
+def require_workspace_member(ctx: AuthContext, tenant_id: str) -> None:
+    """AuthContext-flavoured wrapper around `check_workspace_membership`.
+
+    No-op on EE (gateway RBAC owns tenant isolation) and for SSO subjects
+    (no `tenant_account_joins` row by definition).
+    """
+    if dify_config.ENTERPRISE_ENABLED:
+        return
+    if ctx.subject_type != SubjectType.ACCOUNT or ctx.account_id is None:
+        return
+    check_workspace_membership(
+        account_id=ctx.account_id,
+        tenant_id=tenant_id,
+        token_hash=ctx.token_hash,
+        cached_verdicts=ctx.verified_tenants,
     )
 
 
 # ============================================================================
 # Decorator — route-level bearer gate
 # ============================================================================
-
-
-class Accepts(StrEnum):
-    USER_ACCOUNT = "user_account"
-    USER_EXT_SSO = "user_ext_sso"
-
-
-ACCEPT_USER_ANY: frozenset[Accepts] = frozenset({Accepts.USER_ACCOUNT, Accepts.USER_EXT_SSO})
-
-
-_SUBJECT_TO_ACCEPT: dict[SubjectType, Accepts] = {
-    SubjectType.ACCOUNT: Accepts.USER_ACCOUNT,
-    SubjectType.EXTERNAL_SSO: Accepts.USER_EXT_SSO,
-}
 
 
 _authenticator: BearerAuthenticator | None = None
@@ -414,17 +549,10 @@ def bearer_feature_required[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     return inner
 
 
-# "full" is the catch-all scope carried by dfoa_ tokens; any scope check
-# passes when the bearer holds it. dfoe_ ships with apps:run and a few
-# narrower scopes; PATs (future) carry only what the user requested at
-# mint time.
-SCOPE_FULL = "full"
-
-
-def require_scope(scope: str) -> Callable:
+def require_scope(scope: Scope) -> Callable:
     """Route-level scope gate — must run AFTER validate_bearer so that
     g.auth_ctx is set. Raises Forbidden('insufficient_scope: <scope>')
-    when the bearer lacks both the requested scope and the catch-all.
+    when the bearer lacks both the requested scope and `Scope.FULL`.
     """
 
     def wrap(fn: Callable) -> Callable:
@@ -435,7 +563,7 @@ def require_scope(scope: str) -> Callable:
                 raise RuntimeError(
                     "require_scope used without validate_bearer; stack @validate_bearer above @require_scope"
                 )
-            if SCOPE_FULL not in ctx.scopes and scope not in ctx.scopes:
+            if Scope.FULL not in ctx.scopes and scope not in ctx.scopes:
                 raise Forbidden(f"insufficient_scope: {scope}")
             return fn(*args, **kwargs)
 
@@ -456,14 +584,14 @@ def build_registry(session_factory, redis_client) -> TokenKindRegistry:
             TokenKind(
                 prefix="dfoa_",
                 subject_type=SubjectType.ACCOUNT,
-                scopes=frozenset({"full"}),
+                scopes=frozenset({Scope.FULL}),
                 source="oauth_account",
                 resolver=oauth.for_account(),
             ),
             TokenKind(
                 prefix="dfoe_",
                 subject_type=SubjectType.EXTERNAL_SSO,
-                scopes=frozenset({"apps:run"}),
+                scopes=frozenset({Scope.APPS_RUN}),
                 source="oauth_external_sso",
                 resolver=oauth.for_external_sso(),
             ),

@@ -12,6 +12,7 @@ from functools import wraps
 from flask import request
 
 from controllers.openapi.auth.context import Context, Step
+from libs.oauth_bearer import Scope
 
 
 class Pipeline:
@@ -22,7 +23,7 @@ class Pipeline:
         for step in self._steps:
             step(ctx)
 
-    def guard(self, *, scope: str):
+    def guard(self, *, scope: Scope):
         def decorator(view):
             @wraps(view)
             def decorated(*args, **kwargs):

@@ -2,7 +2,7 @@
 window Redis ZSET). Apply after auth decorators so scopes can read
 ``g.auth_ctx``. Use :func:`enforce` when the bucket key is computed
 in-handler. RFC-8628 ``slow_down`` is inline — its response shape isn't
-generic 429. Spec: docs/specs/v1.0/server/security.md.
+generic 429.
 """
 
 from __future__ import annotations
@@ -14,9 +14,10 @@ from enum import StrEnum
 from functools import wraps
 from typing import ParamSpec, TypeVar
 
-from flask import g, request, session
+from flask import g, jsonify, make_response, request, session
 from werkzeug.exceptions import TooManyRequests
 
+from configs import dify_config
 from libs.helper import RateLimiter, extract_remote_ip
 
 
@@ -42,6 +43,11 @@ LIMIT_APPROVE_CONSOLE = RateLimit(10, timedelta(hours=1), (RateLimitScope.SESSIO
 LIMIT_LOOKUP_PUBLIC = RateLimit(60, timedelta(minutes=5), (RateLimitScope.IP,))
 LIMIT_ME_PER_ACCOUNT = RateLimit(60, timedelta(minutes=1), (RateLimitScope.ACCOUNT,))
 LIMIT_ME_PER_EMAIL = RateLimit(60, timedelta(minutes=1), (RateLimitScope.SUBJECT_EMAIL,))
+LIMIT_BEARER_PER_TOKEN = RateLimit(
+    limit=dify_config.OPENAPI_RATE_LIMIT_PER_TOKEN,
+    window=timedelta(minutes=1),
+    scopes=(RateLimitScope.TOKEN_ID,),  # bucket key composed by caller from sha256(token)
+)
 
 
 def _one_key(scope: RateLimitScope) -> str:
@@ -112,4 +118,23 @@ def enforce(spec: RateLimit, *, key: str) -> None:
     limiter = _build_limiter(spec)
     if limiter.is_rate_limited(key):
         raise TooManyRequests("rate_limited")
+    limiter.increment_rate_limit(key)
+
+
+def enforce_bearer_rate_limit(token_hash: str) -> None:
+    """Per-token rate limit on /openapi/v1/* bearer-authed routes.
+
+    Bucket key = ``token:<sha256_hex>`` so the same token shares one
+    bucket across api replicas (Redis-backed sliding window).
+    """
+    limiter = _build_limiter(LIMIT_BEARER_PER_TOKEN)
+    key = f"token:{token_hash}"
+    if limiter.is_rate_limited(key):
+        retry_after = limiter.seconds_until_available(key)
+        response = make_response(
+            jsonify({"error": "rate_limited", "retry_after_ms": retry_after * 1000}),
+            429,
+        )
+        response.headers["Retry-After"] = str(retry_after)
+        raise TooManyRequests(response=response)
     limiter.increment_rate_limit(key)

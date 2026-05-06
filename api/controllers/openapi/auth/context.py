@@ -7,29 +7,35 @@ read populated values via the decorator's kwargs unpacking.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from flask import Request
 
-from libs.oauth_bearer import SubjectType
+from libs.oauth_bearer import Scope, SubjectType
+
+if TYPE_CHECKING:
+    from models import App, Tenant
 
 
 @dataclass
 class Context:
     request: Request
-    required_scope: str
+    required_scope: Scope
     subject_type: SubjectType | None = None
     subject_email: str | None = None
     subject_issuer: str | None = None
-    account_id: str | None = None
-    scopes: frozenset[str] = field(default_factory=frozenset)
-    token_id: str | None = None
+    account_id: uuid.UUID | None = None
+    scopes: frozenset[Scope] = field(default_factory=frozenset)
+    token_id: uuid.UUID | None = None
+    token_hash: str | None = None
+    cached_verified_tenants: dict[str, bool] | None = None
     source: str | None = None
     expires_at: datetime | None = None
-    app: object | None = None
-    tenant: object | None = None
+    app: App | None = None
+    tenant: Tenant | None = None
     caller: object | None = None
     caller_kind: Literal["account", "end_user"] | None = None
 
