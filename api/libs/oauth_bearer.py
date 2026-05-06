@@ -47,11 +47,12 @@ class Scope(StrEnum):
 
     `FULL` is the catch-all carried by `dfoa_` account tokens — it satisfies
     any per-route `require_scope`. `dfoe_` tokens carry the per-feature scopes
-    (`APPS_RUN` today).
+    (`APPS_RUN`, `APPS_READ_PERMITTED`).
     """
 
     FULL = "full"
     APPS_READ = "apps:read"
+    APPS_READ_PERMITTED = "apps:read:permitted"
     APPS_RUN = "apps:run"
 
 
@@ -63,6 +64,7 @@ class Accepts(StrEnum):
 
 
 ACCEPT_USER_ANY: frozenset[Accepts] = frozenset({Accepts.USER_ACCOUNT, Accepts.USER_EXT_SSO})
+ACCEPT_USER_EXT_SSO: frozenset[Accepts] = frozenset({Accepts.USER_EXT_SSO})
 
 _SUBJECT_TO_ACCEPT: dict[SubjectType, Accepts] = {
     SubjectType.ACCOUNT: Accepts.USER_ACCOUNT,
@@ -591,7 +593,7 @@ def build_registry(session_factory, redis_client) -> TokenKindRegistry:
             TokenKind(
                 prefix="dfoe_",
                 subject_type=SubjectType.EXTERNAL_SSO,
-                scopes=frozenset({Scope.APPS_RUN}),
+                scopes=frozenset({Scope.APPS_RUN, Scope.APPS_READ_PERMITTED}),
                 source="oauth_external_sso",
                 resolver=oauth.for_external_sso(),
             ),

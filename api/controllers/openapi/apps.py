@@ -41,7 +41,7 @@ from libs.oauth_bearer import (
     require_workspace_member,
     validate_bearer,
 )
-from models import App
+from models import App, Tenant
 from models.model import AppMode, Tag, TagBinding
 
 # Shared decorator stack for `apps:read`-scoped endpoints. List order is
@@ -185,6 +185,8 @@ class AppListApi(Resource):
         workspace_id = query.workspace_id
         require_workspace_member(ctx, workspace_id)
 
+        tenant_name = db.session.execute(sa.select(Tenant.name).where(Tenant.id == workspace_id)).scalar_one_or_none()
+
         page = query.page
         limit = query.limit
         mode = query.mode.value if query.mode else None
@@ -228,6 +230,8 @@ class AppListApi(Resource):
                 tags=[{"name": t.name} for t in r.tags],
                 updated_at=r.updated_at.isoformat() if r.updated_at else None,
                 created_by_name=getattr(r, "author_name", None),
+                workspace_id=str(workspace_id),
+                workspace_name=tenant_name,
             )
             for r in rows
         ]

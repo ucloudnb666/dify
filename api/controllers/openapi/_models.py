@@ -45,6 +45,8 @@ class AppListRow(BaseModel):
     tags: list[dict[str, str]] = []
     updated_at: str | None = None
     created_by_name: str | None = None
+    workspace_id: str | None = None
+    workspace_name: str | None = None
 
 
 class AppInfoResponse(BaseModel):
