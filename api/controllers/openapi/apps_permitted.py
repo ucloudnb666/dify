@@ -6,7 +6,7 @@ import sqlalchemy as sa
 from flask import g, request
 from flask_restx import Resource
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from werkzeug.exceptions import UnprocessableEntity
+from werkzeug.exceptions import InternalServerError, UnprocessableEntity
 
 from controllers.openapi import openapi_ns
 from controllers.openapi._models import (
@@ -28,11 +28,7 @@ from services.enterprise.app_permitted_service import list_permitted_apps
 
 
 class AppPermittedListQuery(BaseModel):
-    """Query-param validator for `GET /openapi/v1/apps/permitted`.
-
-    Strict — `extra='forbid'` rejects `workspace_id`, `tag`, and any other
-    param not explicitly allowed for this surface. Returns 422 on violation.
-    """
+    """Strict (`extra='forbid'`) — rejects `workspace_id`/`tag`/etc. that are valid on /apps but not here."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -43,7 +39,7 @@ class AppPermittedListQuery(BaseModel):
 
 
 @openapi_ns.route("/apps/permitted")
-class AppListPermittedApi(Resource):
+class AppPermittedListApi(Resource):
     method_decorators = [
         require_scope(Scope.APPS_READ_PERMITTED),
         validate_bearer(accept=ACCEPT_USER_EXT_SSO),
@@ -57,9 +53,13 @@ class AppListPermittedApi(Resource):
             raise UnprocessableEntity(exc.json())
 
         ctx = g.auth_ctx
+        # Fail-fast: empty subject would silently corrupt the EE allow-list query.
+        if not ctx.subject_email or not ctx.subject_issuer:
+            raise InternalServerError("malformed external_sso bearer: missing subject identity")
+
         page_result = list_permitted_apps(
-            subject_email=ctx.subject_email or "",
-            subject_issuer=ctx.subject_issuer or "",
+            subject_email=ctx.subject_email,
+            subject_issuer=ctx.subject_issuer,
             page=query.page,
             limit=query.limit,
             mode=query.mode.value if query.mode else None,
@@ -85,8 +85,7 @@ class AppListPermittedApi(Resource):
         for r in page_result.data:
             app = apps_by_id.get(r.app_id)
             if not app or app.status != "normal":
-                # Allow-list referenced an app that no longer exists or was archived;
-                # filter it out rather than emit a partial row.
+                # Skip allow-list entries where the app is missing/archived.
                 continue
             tenant = tenants_by_id.get(str(app.tenant_id))
             items.append(
@@ -95,7 +94,7 @@ class AppListPermittedApi(Resource):
                     name=app.name,
                     description=app.description,
                     mode=app.mode,
-                    tags=[],  # tags are tenant-scoped; not surfaced cross-tenant
+                    tags=[],  # tenant-scoped; not surfaced cross-tenant
                     updated_at=app.updated_at.isoformat() if app.updated_at else None,
                     created_by_name=None,  # cross-tenant author leak prevention
                     workspace_id=str(app.tenant_id),
@@ -103,6 +102,7 @@ class AppListPermittedApi(Resource):
                 )
             )
 
+        # total/has_more reflect the EE-side allow-list; len(items) may be < limit when local rows are dropped.
         env = PaginationEnvelope[AppListRow].build(
             page=query.page, limit=query.limit, total=page_result.total, items=items
         )

@@ -1,11 +1,7 @@
-"""GET /openapi/v1/apps and per-app reads (single, parameters, describe).
+"""GET /openapi/v1/apps and per-app reads.
 
-Read endpoints attach via `AppReadResource`, which stacks
-`validate_bearer + require_scope` as method_decorators. List order is
-innermost-first: `validate_bearer` is last in the list and ends up
-outermost, so it sets `g.auth_ctx` before `require_scope` reads it.
-The OAuth bearer pipeline is reserved for /run (which gates on
-webapp_auth ACL).
+Decorator order: `method_decorators` is innermost-first. `validate_bearer`
+is last → outermost → sets `g.auth_ctx` before `require_scope` reads it.
 """
 
 from __future__ import annotations
@@ -44,9 +40,6 @@ from libs.oauth_bearer import (
 from models import App, Tenant
 from models.model import AppMode, Tag, TagBinding
 
-# Shared decorator stack for `apps:read`-scoped endpoints. List order is
-# innermost-first; `validate_bearer` (last) wraps outermost so it sets
-# `g.auth_ctx` before `require_scope` reads it.
 _APPS_READ_DECORATORS = [
     require_scope(Scope.APPS_READ),
     validate_bearer(accept=ACCEPT_USER_ANY),
@@ -62,17 +55,13 @@ _EMPTY_PARAMETERS: dict[str, Any] = {
 
 
 class AppReadResource(Resource):
-    """Base for `/apps/<id>` read endpoints. Stacks bearer auth + scope check
-    on every method, then exposes `_load()` so subclasses don't repeat the
-    SSO-guard / app-load / membership-check ritual."""
+    """Base for per-app read endpoints; subclasses call `_load()` for SSO/membership/exists checks."""
 
     method_decorators = _APPS_READ_DECORATORS
 
     def _load(self, app_id: str) -> tuple[App, AuthContext]:
         ctx = g.auth_ctx
-        # Per-app reads are account-only; SSO subjects 404 to avoid leaking
-        # ID space (and dfoe_ already lacks apps:read scope, so this is
-        # defensive against future scope changes).
+        # Account-only; SSO subjects 404 (don't leak ID space).
         if ctx.subject_type != SubjectType.ACCOUNT or ctx.account_id is None:
             raise NotFound("app not found")
 
@@ -151,12 +140,7 @@ class AppDescribeApi(AppReadResource):
 
 
 class AppListQuery(BaseModel):
-    """Query-param validator for `GET /openapi/v1/apps`.
-
-    `mode` is a closed set (AppMode) — invalid values surface as 422
-    instead of returning silently-empty data. `workspace_id` is required;
-    page / limit have numeric bounds; name / tag have length caps.
-    """
+    """`mode` is a closed enum — unknown values 422 instead of silently-empty data."""
 
     workspace_id: str
     page: int = Field(1, ge=1)
@@ -173,8 +157,7 @@ class AppListApi(Resource):
     def get(self):
         ctx = g.auth_ctx
         if ctx.subject_type != SubjectType.ACCOUNT or ctx.account_id is None:
-            # An account-required endpoint reachable only via dfoa_ in practice
-            # (dfoe_ lacks apps:read). Defensive guard for future scope shifts.
+            # Defensive: dfoe_ lacks apps:read today, but guard against future scope shifts.
             return PaginationEnvelope[AppListRow].build(page=1, limit=0, total=0, items=[]).model_dump(mode="json"), 200
 
         try:
@@ -184,8 +167,6 @@ class AppListApi(Resource):
 
         workspace_id = query.workspace_id
         require_workspace_member(ctx, workspace_id)
-
-        tenant_name = db.session.execute(sa.select(Tenant.name).where(Tenant.id == workspace_id)).scalar_one_or_none()
 
         page = query.page
         limit = query.limit
@@ -220,6 +201,12 @@ class AppListApi(Resource):
             .scalars()
             .all()
         )
+
+        tenant_name: str | None = None
+        if rows:
+            tenant_name = db.session.execute(
+                sa.select(Tenant.name).where(Tenant.id == workspace_id)
+            ).scalar_one_or_none()
 
         items = [
             AppListRow(

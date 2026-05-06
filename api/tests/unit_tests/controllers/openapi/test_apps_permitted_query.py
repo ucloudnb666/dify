@@ -42,3 +42,10 @@ def test_query_validates_mode_against_app_mode():
 def test_query_clamps_limit_at_max():
     with pytest.raises(ValidationError):
         AppPermittedListQuery.model_validate({"limit": 500})
+
+
+def test_query_accepts_valid_mode():
+    """Pin the happy path: AppMode values pass."""
+    q = AppPermittedListQuery.model_validate({"mode": "chat"})
+    assert q.mode is not None
+    assert q.mode.value == "chat"
