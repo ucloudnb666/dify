@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import sqlalchemy as sa
-from flask import g, request
+from flask import request
 from flask_restx import Resource
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from werkzeug.exceptions import InternalServerError, UnprocessableEntity
+from werkzeug.exceptions import UnprocessableEntity
 
 from controllers.openapi import openapi_ns
 from controllers.openapi._models import (
@@ -52,29 +52,22 @@ class AppPermittedListApi(Resource):
         except ValidationError as exc:
             raise UnprocessableEntity(exc.json())
 
-        ctx = g.auth_ctx
-        # Fail-fast: empty subject would silently corrupt the EE allow-list query.
-        if not ctx.subject_email or not ctx.subject_issuer:
-            raise InternalServerError("malformed external_sso bearer: missing subject identity")
-
         page_result = list_permitted_apps(
-            subject_email=ctx.subject_email,
-            subject_issuer=ctx.subject_issuer,
             page=query.page,
             limit=query.limit,
             mode=query.mode.value if query.mode else None,
             name=query.name,
         )
 
-        if not page_result.data:
+        if not page_result.app_ids:
             env = PaginationEnvelope[AppListRow].build(
                 page=query.page, limit=query.limit, total=page_result.total, items=[]
             )
             return env.model_dump(mode="json"), 200
 
-        app_ids = [r.app_id for r in page_result.data]
         apps_by_id = {
-            str(a.id): a for a in db.session.execute(sa.select(App).where(App.id.in_(app_ids))).scalars().all()
+            str(a.id): a
+            for a in db.session.execute(sa.select(App).where(App.id.in_(page_result.app_ids))).scalars().all()
         }
         tenant_ids = list({a.tenant_id for a in apps_by_id.values()})
         tenants_by_id = {
@@ -82,10 +75,9 @@ class AppPermittedListApi(Resource):
         }
 
         items: list[AppListRow] = []
-        for r in page_result.data:
-            app = apps_by_id.get(r.app_id)
+        for app_id in page_result.app_ids:
+            app = apps_by_id.get(app_id)
             if not app or app.status != "normal":
-                # Skip allow-list entries where the app is missing/archived.
                 continue
             tenant = tenants_by_id.get(str(app.tenant_id))
             items.append(

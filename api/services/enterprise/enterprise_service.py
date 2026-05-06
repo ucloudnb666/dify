@@ -243,6 +243,32 @@ class EnterpriseService:
             params = {"appId": app_id}
             EnterpriseRequest.send_request("DELETE", "/webapp/clean", params=params)
 
+        @classmethod
+        def list_externally_accessible_apps(
+            cls,
+            *,
+            page: int,
+            limit: int,
+            mode: str | None = None,
+            name: str | None = None,
+        ) -> dict:
+            """Call EE InnerListExternallyAccessibleApps; returns raw camelCase response.
+
+            Response shape: ``{"data": [{"appId", "tenantId", "mode", "name", "updatedAt"}],
+            "total": int, "hasMore": bool}``.
+            """
+            body: dict[str, str | int] = {"page": page, "limit": limit}
+            if mode is not None:
+                body["mode"] = mode
+            if name is not None:
+                body["name"] = name
+            return EnterpriseRequest.send_request(
+                "POST",
+                "/webapp/externally-accessible-apps",
+                json=body,
+                timeout=5.0,
+            )
+
     @classmethod
     def get_cached_license_status(cls) -> LicenseStatus | None:
         """Get enterprise license status with Redis caching to reduce HTTP calls.
