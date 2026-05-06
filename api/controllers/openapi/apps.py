@@ -1,7 +1,10 @@
 """GET /openapi/v1/apps and per-app reads (single, parameters, describe).
 
-Read endpoints use validate_bearer + require_scope + require_workspace_member.
-The OAuth bearer pipeline is reserved for /run (which gates on webapp_auth ACL).
+Read endpoints attach via `_AppReadResource`, which stacks
+`validate_bearer + require_scope` as method_decorators (Flask-RESTX runs
+them in reverse order, so validate_bearer wraps the outside).
+The OAuth bearer pipeline is reserved for /run (which gates on
+webapp_auth ACL).
 """
 
 from __future__ import annotations
@@ -11,17 +14,25 @@ from typing import Any, cast
 import sqlalchemy as sa
 from flask import g, request
 from flask_restx import Resource
-from werkzeug.exceptions import BadRequest, Forbidden, NotFound
+from werkzeug.exceptions import BadRequest, NotFound
 
 from controllers.common.fields import Parameters
 from controllers.openapi import openapi_ns
-from controllers.openapi._models import PaginationEnvelope
+from controllers.openapi._models import (
+    MAX_PAGE_LIMIT,
+    AppDescribeInfo,
+    AppDescribeResponse,
+    AppInfoResponse,
+    AppListRow,
+    PaginationEnvelope,
+)
 from controllers.service_api.app.error import AppUnavailableError
 from core.app.app_config.common.parameters_mapping import get_parameters_from_feature_dict
 from extensions.ext_database import db
 from libs.helper import escape_like_pattern
 from libs.oauth_bearer import (
     ACCEPT_USER_ANY,
+    AuthContext,
     Scope,
     SubjectType,
     require_scope,
@@ -31,54 +42,50 @@ from libs.oauth_bearer import (
 from models import App
 from models.model import AppMode, Tag, TagBinding
 
+_EMPTY_PARAMETERS: dict[str, Any] = {
+    "opening_statement": None,
+    "suggested_questions": [],
+    "user_input_form": [],
+    "file_upload": None,
+    "system_parameters": {},
+}
 
-def account_or_404(ctx) -> None:
-    """Per-app reads are account-only; SSO subjects 404 to avoid leaking ID space."""
-    if ctx.subject_type != SubjectType.ACCOUNT or ctx.account_id is None:
-        raise NotFound("app not found")
 
+class _AppReadResource(Resource):
+    """Base for `/apps/<id>` read endpoints. Stacks bearer auth + scope check
+    on every method, then exposes `_load()` so subclasses don't repeat the
+    SSO-guard / app-load / membership-check ritual."""
 
-@openapi_ns.route("/apps/<string:app_id>")
-class AppByIdApi(Resource):
-    @validate_bearer(accept=ACCEPT_USER_ANY)
-    @require_scope(Scope.APPS_READ)  # type: ignore[reportUntypedFunctionDecorator]
-    def get(self, app_id: str):
+    method_decorators = [
+        require_scope(Scope.APPS_READ),
+        validate_bearer(accept=ACCEPT_USER_ANY),
+    ]
+
+    def _load(self, app_id: str) -> tuple[App, AuthContext]:
         ctx = g.auth_ctx
-        account_or_404(ctx)
+        # Per-app reads are account-only; SSO subjects 404 to avoid leaking
+        # ID space (and dfoe_ already lacks apps:read scope, so this is
+        # defensive against future scope changes).
+        if ctx.subject_type != SubjectType.ACCOUNT or ctx.account_id is None:
+            raise NotFound("app not found")
 
         app = db.session.get(App, app_id)
         if not app or app.status != "normal":
             raise NotFound("app not found")
 
         require_workspace_member(ctx, str(app.tenant_id))
-        return app_info_payload(app), 200
+        return app, ctx
 
 
 def app_info_payload(app: App) -> dict:
-    return {
-        "id": str(app.id),
-        "name": app.name,
-        "description": app.description,
-        "mode": app.mode,
-        "author": app.author_name,
-        "tags": [{"name": t.name} for t in app.tags],
-    }
-
-
-@openapi_ns.route("/apps/<string:app_id>/parameters")
-class AppParametersApi(Resource):
-    @validate_bearer(accept=ACCEPT_USER_ANY)
-    @require_scope(Scope.APPS_READ)  # type: ignore[reportUntypedFunctionDecorator]
-    def get(self, app_id: str):
-        ctx = g.auth_ctx
-        account_or_404(ctx)
-
-        app = db.session.get(App, app_id)
-        if not app or app.status != "normal":
-            raise NotFound("app not found")
-
-        require_workspace_member(ctx, str(app.tenant_id))
-        return parameters_payload(app), 200
+    return AppInfoResponse(
+        id=str(app.id),
+        name=app.name,
+        description=app.description,
+        mode=app.mode,
+        author=app.author_name,
+        tags=[{"name": t.name} for t in app.tags],
+    ).model_dump(mode="json")
 
 
 def parameters_payload(app: App) -> dict:
@@ -100,59 +107,55 @@ def parameters_payload(app: App) -> dict:
     return Parameters.model_validate(parameters).model_dump(mode="json")
 
 
-_EMPTY_PARAMETERS: dict[str, Any] = {
-    "opening_statement": None,
-    "suggested_questions": [],
-    "user_input_form": [],
-    "file_upload": None,
-    "system_parameters": {},
-}
+@openapi_ns.route("/apps/<string:app_id>")
+class AppByIdApi(_AppReadResource):
+    def get(self, app_id: str):
+        app, _ = self._load(app_id)
+        return app_info_payload(app), 200
+
+
+@openapi_ns.route("/apps/<string:app_id>/parameters")
+class AppParametersApi(_AppReadResource):
+    def get(self, app_id: str):
+        app, _ = self._load(app_id)
+        return parameters_payload(app), 200
 
 
 @openapi_ns.route("/apps/<string:app_id>/describe")
-class AppDescribeApi(Resource):
-    @validate_bearer(accept=ACCEPT_USER_ANY)
-    @require_scope(Scope.APPS_READ)  # type: ignore[reportUntypedFunctionDecorator]
+class AppDescribeApi(_AppReadResource):
     def get(self, app_id: str):
-        ctx = g.auth_ctx
-        account_or_404(ctx)
-
-        app = db.session.get(App, app_id)
-        if not app or app.status != "normal":
-            raise NotFound("app not found")
-
-        require_workspace_member(ctx, str(app.tenant_id))
-
+        app, _ = self._load(app_id)
         try:
             parameters = parameters_payload(app)
         except AppUnavailableError:
-            # Apps without a model config still expose info; absent parameters
-            # render as explicit empty/null fields per spec.
             parameters = dict(_EMPTY_PARAMETERS)
 
-        return {
-            "info": {
-                "id": str(app.id),
-                "name": app.name,
-                "mode": app.mode,
-                "description": app.description,
-                "tags": [{"name": t.name} for t in app.tags],
-                "author": app.author_name,
-                "updated_at": app.updated_at.isoformat() if app.updated_at else None,
-                "service_api_enabled": bool(app.enable_api),
-            },
-            "parameters": parameters,
-        }, 200
+        info = AppDescribeInfo(
+            id=str(app.id),
+            name=app.name,
+            mode=app.mode,
+            description=app.description,
+            tags=[{"name": t.name} for t in app.tags],
+            author=app.author_name,
+            updated_at=app.updated_at.isoformat() if app.updated_at else None,
+            service_api_enabled=bool(app.enable_api),
+        )
+        return AppDescribeResponse(info=info, parameters=parameters).model_dump(mode="json"), 200
 
 
 @openapi_ns.route("/apps")
 class AppListApi(Resource):
-    @validate_bearer(accept=ACCEPT_USER_ANY)
-    @require_scope(Scope.APPS_READ)  # type: ignore[reportUntypedFunctionDecorator]
+    method_decorators = [
+        require_scope(Scope.APPS_READ),
+        validate_bearer(accept=ACCEPT_USER_ANY),
+    ]
+
     def get(self):
         ctx = g.auth_ctx
         if ctx.subject_type != SubjectType.ACCOUNT or ctx.account_id is None:
-            raise Forbidden("subject not permitted to list apps")
+            # An account-required endpoint reachable only via dfoa_ in practice
+            # (dfoe_ lacks apps:read). Defensive guard for future scope shifts.
+            return PaginationEnvelope[AppListRow].build(page=1, limit=0, total=0, items=[]).model_dump(mode="json"), 200
 
         workspace_id = request.args.get("workspace_id")
         if not workspace_id:
@@ -160,15 +163,16 @@ class AppListApi(Resource):
 
         require_workspace_member(ctx, workspace_id)
 
+        # NOTE: ad-hoc int(...) parsing below — Task 3 swaps this for AppListQuery.
         page = int(request.args.get("page", "1"))
-        limit = min(int(request.args.get("limit", "20")), 100)
+        limit = min(int(request.args.get("limit", "20")), MAX_PAGE_LIMIT)
         mode = request.args.get("mode")
         name_filter = request.args.get("name")
         tag_name = request.args.get("tag")
 
         filters = [
             App.tenant_id == workspace_id,
-            App.is_universal == False,
+            App.is_universal.is_(False),
             App.status == "normal",
         ]
         if mode:
@@ -195,18 +199,16 @@ class AppListApi(Resource):
         )
 
         items = [
-            {
-                "id": str(r.id),
-                "name": r.name,
-                "description": r.description,
-                "mode": r.mode,
-                "tags": [{"name": t.name} for t in r.tags],
-                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
-                "created_by_name": getattr(r, "author_name", None),
-            }
+            AppListRow(
+                id=str(r.id),
+                name=r.name,
+                description=r.description,
+                mode=r.mode,
+                tags=[{"name": t.name} for t in r.tags],
+                updated_at=r.updated_at.isoformat() if r.updated_at else None,
+                created_by_name=getattr(r, "author_name", None),
+            )
             for r in rows
         ]
-        return (
-            PaginationEnvelope.build(page=page, limit=limit, total=int(total), items=items).model_dump(mode="json"),
-            200,
-        )
+        env = PaginationEnvelope[AppListRow].build(page=page, limit=limit, total=int(total), items=items)
+        return env.model_dump(mode="json"), 200
