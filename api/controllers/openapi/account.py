@@ -13,7 +13,7 @@ from sqlalchemy import and_, select, update
 from werkzeug.exceptions import BadRequest, NotFound
 
 from controllers.openapi import openapi_ns
-from controllers.openapi._models import PaginationEnvelope
+from controllers.openapi._models import MAX_PAGE_LIMIT, PaginationEnvelope
 from extensions.ext_database import db
 from extensions.ext_redis import redis_client
 from libs.oauth_bearer import (
@@ -84,7 +84,7 @@ class AccountSessionsApi(Resource):
         ctx = g.auth_ctx
         now = datetime.now(UTC)
         page = int(request.args.get("page", "1"))
-        limit = min(int(request.args.get("limit", "100")), 200)
+        limit = min(int(request.args.get("limit", "100")), MAX_PAGE_LIMIT)
 
         all_rows = db.session.execute(
             select(
