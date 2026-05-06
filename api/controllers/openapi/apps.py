@@ -6,28 +6,27 @@ is last → outermost → sets `g.auth_ctx` before `require_scope` reads it.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import sqlalchemy as sa
 from flask import g, request
 from flask_restx import Resource
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from werkzeug.exceptions import NotFound, UnprocessableEntity
 
 from controllers.common.fields import Parameters
 from controllers.openapi import openapi_ns
+from controllers.openapi._input_schema import EMPTY_INPUT_SCHEMA, build_input_schema, resolve_app_config
 from controllers.openapi._models import (
     MAX_PAGE_LIMIT,
     AppDescribeInfo,
     AppDescribeResponse,
-    AppInfoResponse,
     AppListRow,
     PaginationEnvelope,
 )
 from controllers.service_api.app.error import AppUnavailableError
 from core.app.app_config.common.parameters_mapping import get_parameters_from_feature_dict
 from extensions.ext_database import db
-from libs.helper import escape_like_pattern
 from libs.oauth_bearer import (
     ACCEPT_USER_ANY,
     AuthContext,
@@ -38,12 +37,41 @@ from libs.oauth_bearer import (
     validate_bearer,
 )
 from models import App, Tenant
-from models.model import AppMode, Tag, TagBinding
+from models.model import AppMode
+from services.app_service import AppService
+from services.tag_service import TagService
 
 _APPS_READ_DECORATORS = [
     require_scope(Scope.APPS_READ),
     validate_bearer(accept=ACCEPT_USER_ANY),
 ]
+
+_ALLOWED_DESCRIBE_FIELDS: frozenset[str] = frozenset({"info", "parameters", "input_schema"})
+
+
+class AppDescribeQuery(BaseModel):
+    """`?fields=` allow-list for GET /apps/<id>/describe.
+
+    Empty / omitted → all blocks. Unknown member → ValidationError → 422.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fields: set[str] | None = None
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def _parse_fields(cls, v: object) -> set[str] | None:
+        if v is None or v == "":
+            return None
+        if not isinstance(v, str):
+            raise ValueError("fields must be a comma-separated string")
+        members = {m.strip() for m in v.split(",") if m.strip()}
+        unknown = members - _ALLOWED_DESCRIBE_FIELDS
+        if unknown:
+            raise ValueError(f"unknown field(s): {sorted(unknown)}")
+        return members
+
 
 _EMPTY_PARAMETERS: dict[str, Any] = {
     "opening_statement": None,
@@ -73,70 +101,64 @@ class AppReadResource(Resource):
         return app, ctx
 
 
-def app_info_payload(app: App) -> dict:
-    return AppInfoResponse(
-        id=str(app.id),
-        name=app.name,
-        description=app.description,
-        mode=app.mode,
-        author=app.author_name,
-        tags=[{"name": t.name} for t in app.tags],
-    ).model_dump(mode="json")
-
-
 def parameters_payload(app: App) -> dict:
     """Mirrors service_api/app/app.py::AppParameterApi response body."""
-    if app.mode in {AppMode.ADVANCED_CHAT, AppMode.WORKFLOW}:
-        workflow = app.workflow
-        if workflow is None:
-            raise AppUnavailableError()
-        features_dict: dict[str, Any] = workflow.features_dict
-        user_input_form = workflow.user_input_form(to_old_structure=True)
-    else:
-        app_model_config = app.app_model_config
-        if app_model_config is None:
-            raise AppUnavailableError()
-        features_dict = cast(dict[str, Any], app_model_config.to_dict())
-        user_input_form = features_dict.get("user_input_form", [])
-
+    features_dict, user_input_form = resolve_app_config(app)
     parameters = get_parameters_from_feature_dict(features_dict=features_dict, user_input_form=user_input_form)
     return Parameters.model_validate(parameters).model_dump(mode="json")
-
-
-@openapi_ns.route("/apps/<string:app_id>")
-class AppByIdApi(AppReadResource):
-    def get(self, app_id: str):
-        app, _ = self._load(app_id)
-        return app_info_payload(app), 200
-
-
-@openapi_ns.route("/apps/<string:app_id>/parameters")
-class AppParametersApi(AppReadResource):
-    def get(self, app_id: str):
-        app, _ = self._load(app_id)
-        return parameters_payload(app), 200
 
 
 @openapi_ns.route("/apps/<string:app_id>/describe")
 class AppDescribeApi(AppReadResource):
     def get(self, app_id: str):
         app, _ = self._load(app_id)
-        try:
-            parameters = parameters_payload(app)
-        except AppUnavailableError:
-            parameters = dict(_EMPTY_PARAMETERS)
 
-        info = AppDescribeInfo(
-            id=str(app.id),
-            name=app.name,
-            mode=app.mode,
-            description=app.description,
-            tags=[{"name": t.name} for t in app.tags],
-            author=app.author_name,
-            updated_at=app.updated_at.isoformat() if app.updated_at else None,
-            service_api_enabled=bool(app.enable_api),
+        try:
+            query = AppDescribeQuery.model_validate(request.args.to_dict(flat=True))
+        except ValidationError as exc:
+            raise UnprocessableEntity(exc.json())
+
+        requested = query.fields
+        want_info = requested is None or "info" in requested
+        want_params = requested is None or "parameters" in requested
+        want_schema = requested is None or "input_schema" in requested
+
+        info = (
+            AppDescribeInfo(
+                id=str(app.id),
+                name=app.name,
+                mode=app.mode,
+                description=app.description,
+                tags=[{"name": t.name} for t in app.tags],
+                author=app.author_name,
+                updated_at=app.updated_at.isoformat() if app.updated_at else None,
+                service_api_enabled=bool(app.enable_api),
+            )
+            if want_info
+            else None
         )
-        return AppDescribeResponse(info=info, parameters=parameters).model_dump(mode="json"), 200
+
+        parameters: dict[str, Any] | None = None
+        input_schema: dict[str, Any] | None = None
+        if want_params:
+            try:
+                parameters = parameters_payload(app)
+            except AppUnavailableError:
+                parameters = dict(_EMPTY_PARAMETERS)
+        if want_schema:
+            try:
+                input_schema = build_input_schema(app)
+            except AppUnavailableError:
+                input_schema = dict(EMPTY_INPUT_SCHEMA)
+
+        return (
+            AppDescribeResponse(
+                info=info,
+                parameters=parameters,
+                input_schema=input_schema,
+            ).model_dump(mode="json", exclude_none=False),
+            200,
+        )
 
 
 class AppListQuery(BaseModel):
@@ -157,7 +179,6 @@ class AppListApi(Resource):
     def get(self):
         ctx = g.auth_ctx
         if ctx.subject_type != SubjectType.ACCOUNT or ctx.account_id is None:
-            # Defensive: dfoe_ lacks apps:read today, but guard against future scope shifts.
             return PaginationEnvelope[AppListRow].build(page=1, limit=0, total=0, items=[]).model_dump(mode="json"), 200
 
         try:
@@ -168,42 +189,36 @@ class AppListApi(Resource):
         workspace_id = query.workspace_id
         require_workspace_member(ctx, workspace_id)
 
-        page = query.page
-        limit = query.limit
-        mode = query.mode.value if query.mode else None
-        name_filter = query.name
-        tag_name = query.tag
-
-        filters = [
-            App.tenant_id == workspace_id,
-            App.is_universal.is_(False),
-            App.status == "normal",
-        ]
-        if mode:
-            filters.append(App.mode == mode)
-        if name_filter:
-            escaped = escape_like_pattern(name_filter[:30])
-            filters.append(App.name.ilike(f"%{escaped}%", escape="\\"))
-        if tag_name:
-            tag_app_ids = (
-                db.session.query(TagBinding.target_id)
-                .join(Tag, Tag.id == TagBinding.tag_id)
-                .filter(Tag.tenant_id == workspace_id, Tag.type == "app", Tag.name == tag_name)
-                .subquery()
-            )
-            filters.append(App.id.in_(sa.select(tag_app_ids.c.target_id)))
-
-        total = db.session.execute(sa.select(sa.func.count()).select_from(App).where(*filters)).scalar() or 0
-        rows = (
-            db.session.execute(
-                sa.select(App).where(*filters).order_by(App.created_at.desc()).limit(limit).offset((page - 1) * limit)
-            )
-            .scalars()
-            .all()
+        empty = (
+            PaginationEnvelope[AppListRow]
+            .build(page=query.page, limit=query.limit, total=0, items=[])
+            .model_dump(mode="json"),
+            200,
         )
 
+        tag_ids: list[str] | None = None
+        if query.tag:
+            tags = TagService.get_tag_by_tag_name("app", workspace_id, query.tag)
+            if not tags:
+                return empty
+            tag_ids = [tag.id for tag in tags]
+
+        args: dict[str, Any] = {
+            "page": query.page,
+            "limit": query.limit,
+            "mode": query.mode.value if query.mode else "",
+            "name": query.name,
+            "status": "normal",
+        }
+        if tag_ids:
+            args["tag_ids"] = tag_ids
+
+        pagination = AppService().get_paginate_apps(ctx.account_id, workspace_id, args)
+        if pagination is None:
+            return empty
+
         tenant_name: str | None = None
-        if rows:
+        if pagination.items:
             tenant_name = db.session.execute(
                 sa.select(Tenant.name).where(Tenant.id == workspace_id)
             ).scalar_one_or_none()
@@ -220,7 +235,9 @@ class AppListApi(Resource):
                 workspace_id=str(workspace_id),
                 workspace_name=tenant_name,
             )
-            for r in rows
+            for r in pagination.items
         ]
-        env = PaginationEnvelope[AppListRow].build(page=page, limit=limit, total=int(total), items=items)
+        env = PaginationEnvelope[AppListRow].build(
+            page=query.page, limit=query.limit, total=int(pagination.total), items=items
+        )
         return env.model_dump(mode="json"), 200

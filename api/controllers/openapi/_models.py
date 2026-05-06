@@ -64,5 +64,6 @@ class AppDescribeInfo(AppInfoResponse):
 
 
 class AppDescribeResponse(BaseModel):
-    info: AppDescribeInfo
-    parameters: dict[str, Any]
+    info: AppDescribeInfo | None = None
+    parameters: dict[str, Any] | None = None
+    input_schema: dict[str, Any] | None = None

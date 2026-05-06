@@ -10,7 +10,6 @@ import pytest
 
 from controllers.openapi.apps import (  # pyright: ignore[reportPrivateUsage]
     _EMPTY_PARAMETERS,
-    app_info_payload,
     parameters_payload,
 )
 from controllers.service_api.app.error import AppUnavailableError
@@ -31,24 +30,6 @@ def _fake_app(**overrides):
     }
     base.update(overrides)
     return SimpleNamespace(**base)
-
-
-def test_app_info_payload_shape():
-    payload = app_info_payload(_fake_app())
-    assert payload == {
-        "id": "app1",
-        "name": "X",
-        "description": "d",
-        "mode": "chat",
-        "author": "alice",
-        "tags": [{"name": "prod"}],
-    }
-
-
-def test_app_info_payload_handles_missing_description_and_author():
-    payload = app_info_payload(_fake_app(description=None, author_name=None))
-    assert payload["description"] is None
-    assert payload["author"] is None
 
 
 def test_parameters_payload_raises_app_unavailable_when_no_config():

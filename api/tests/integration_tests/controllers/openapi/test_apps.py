@@ -2,62 +2,33 @@
 
 from __future__ import annotations
 
-import uuid
-
 from flask.testing import FlaskClient
 
 from models import App
 
 
-def test_apps_get_single_returns_app_info(
-    test_client: FlaskClient,
-    app_in_workspace: App,
-    account_token: str,
-):
-    res = test_client.get(
+def test_apps_bare_id_route_404(test_client, app_in_workspace, account_token):
+    resp = test_client.get(
         f"/openapi/v1/apps/{app_in_workspace.id}",
         headers={"Authorization": f"Bearer {account_token}"},
     )
-    assert res.status_code == 200
-    body = res.json
-    assert body["id"] == app_in_workspace.id
-    assert body["mode"] == "chat"
+    assert resp.status_code == 404
 
 
-def test_apps_get_single_rejects_external_sso(
-    test_client: FlaskClient,
-    app_in_workspace: App,
-    mint_token,
-):
-    """dfoe_ tokens hold only `apps:run` — `apps:read` routes 403."""
-    token = "dfoe_" + uuid.uuid4().hex
-    mint_token(
-        token,
-        account_id=None,
-        prefix="dfoe_",
-        subject_email="ext@example.com",
-        subject_issuer="https://idp.example.com",
-    )
-    res = test_client.get(
-        f"/openapi/v1/apps/{app_in_workspace.id}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert res.status_code == 403
-    assert "insufficient_scope" in res.json.get("message", "")
-
-
-def test_apps_parameters_returns_form_schema(
-    test_client: FlaskClient,
-    app_in_workspace: App,
-    account_token: str,
-):
-    res = test_client.get(
+def test_apps_parameters_route_404(test_client, app_in_workspace, account_token):
+    resp = test_client.get(
         f"/openapi/v1/apps/{app_in_workspace.id}/parameters",
         headers={"Authorization": f"Bearer {account_token}"},
     )
-    # Without an app_model_config, the chat app's parameters endpoint raises
-    # AppUnavailableError (503). Auth succeeded if status is NOT 401/403.
-    assert res.status_code in (200, 503)
+    assert resp.status_code == 404
+
+
+def test_apps_info_route_404(test_client, app_in_workspace, account_token):
+    resp = test_client.get(
+        f"/openapi/v1/apps/{app_in_workspace.id}/info",
+        headers={"Authorization": f"Bearer {account_token}"},
+    )
+    assert resp.status_code == 404
 
 
 def test_apps_describe_returns_merged_shape(
@@ -74,6 +45,111 @@ def test_apps_describe_returns_merged_shape(
     assert body["info"]["id"] == app_in_workspace.id
     assert body["info"]["mode"] == "chat"
     assert isinstance(body["parameters"], dict)
+
+
+def test_apps_describe_full_includes_input_schema(
+    test_client: FlaskClient,
+    app_in_workspace: App,
+    account_token: str,
+):
+    res = test_client.get(
+        f"/openapi/v1/apps/{app_in_workspace.id}/describe",
+        headers={"Authorization": f"Bearer {account_token}"},
+    )
+    assert res.status_code == 200
+    body = res.json
+    assert body["info"] is not None
+    assert body["parameters"] is not None
+    assert body["input_schema"] is not None
+    assert body["input_schema"]["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+
+
+def test_apps_describe_fields_info_only(
+    test_client: FlaskClient,
+    app_in_workspace: App,
+    account_token: str,
+):
+    res = test_client.get(
+        f"/openapi/v1/apps/{app_in_workspace.id}/describe?fields=info",
+        headers={"Authorization": f"Bearer {account_token}"},
+    )
+    assert res.status_code == 200
+    body = res.json
+    assert body["info"] is not None
+    assert body["parameters"] is None
+    assert body["input_schema"] is None
+
+
+def test_apps_describe_fields_parameters_only(
+    test_client: FlaskClient,
+    app_in_workspace: App,
+    account_token: str,
+):
+    res = test_client.get(
+        f"/openapi/v1/apps/{app_in_workspace.id}/describe?fields=parameters",
+        headers={"Authorization": f"Bearer {account_token}"},
+    )
+    assert res.status_code == 200
+    body = res.json
+    assert body["info"] is None
+    assert body["parameters"] is not None
+    assert body["input_schema"] is None
+
+
+def test_apps_describe_fields_input_schema_only(
+    test_client: FlaskClient,
+    app_in_workspace: App,
+    account_token: str,
+):
+    res = test_client.get(
+        f"/openapi/v1/apps/{app_in_workspace.id}/describe?fields=input_schema",
+        headers={"Authorization": f"Bearer {account_token}"},
+    )
+    assert res.status_code == 200
+    body = res.json
+    assert body["info"] is None
+    assert body["parameters"] is None
+    assert body["input_schema"] is not None
+
+
+def test_apps_describe_fields_combined(
+    test_client: FlaskClient,
+    app_in_workspace: App,
+    account_token: str,
+):
+    res = test_client.get(
+        f"/openapi/v1/apps/{app_in_workspace.id}/describe?fields=info,input_schema",
+        headers={"Authorization": f"Bearer {account_token}"},
+    )
+    assert res.status_code == 200
+    body = res.json
+    assert body["info"] is not None
+    assert body["parameters"] is None
+    assert body["input_schema"] is not None
+
+
+def test_apps_describe_fields_unknown_returns_422(
+    test_client: FlaskClient,
+    app_in_workspace: App,
+    account_token: str,
+):
+    res = test_client.get(
+        f"/openapi/v1/apps/{app_in_workspace.id}/describe?fields=garbage",
+        headers={"Authorization": f"Bearer {account_token}"},
+    )
+    assert res.status_code == 422
+
+
+def test_apps_describe_fields_extra_param_returns_422(
+    test_client: FlaskClient,
+    app_in_workspace: App,
+    account_token: str,
+):
+    res = test_client.get(
+        f"/openapi/v1/apps/{app_in_workspace.id}/describe?fields=info&page=1",
+        headers={"Authorization": f"Bearer {account_token}"},
+    )
+    assert res.status_code == 422
 
 
 def test_apps_list_returns_pagination_envelope(
