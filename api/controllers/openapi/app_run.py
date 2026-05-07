@@ -139,6 +139,7 @@ def _run_chat(app: App, caller: Any, payload: AppRunRequest, streaming: bool):
 
 def _run_completion(app: App, caller: Any, payload: AppRunRequest, streaming: bool):
     args = payload.model_dump(exclude_none=True)
+    # Completion mode disables auto-naming + tolerates absent query (legacy parity).
     args["auto_generate_name"] = False
     args.setdefault("query", "")
     try:
@@ -191,7 +192,7 @@ def _run_workflow(app: App, caller: Any, payload: AppRunRequest, streaming: bool
     return None, WorkflowRunResponse.model_validate(body).model_dump(mode="json")
 
 
-_DISPATCH: dict[AppMode, Callable[[App, Any, AppRunRequest, bool], tuple[Any, Any]]] = {
+_DISPATCH: dict[AppMode, Callable[[App, Any, AppRunRequest, bool], tuple[Any, dict[str, Any] | None]]] = {
     AppMode.CHAT: _run_chat,
     AppMode.AGENT_CHAT: _run_chat,
     AppMode.ADVANCED_CHAT: _run_chat,
