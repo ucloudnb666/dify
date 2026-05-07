@@ -195,7 +195,6 @@ def test_run_with_insufficient_scope_returns_403(
 
     def _stub_authenticate(self, token: str):
         ctx = real_authenticate(self, token)
-        # Return a copy with empty scopes — frozen dataclass requires replace.
         from dataclasses import replace
 
         return replace(ctx, scopes=frozenset())

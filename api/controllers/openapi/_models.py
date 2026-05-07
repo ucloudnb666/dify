@@ -108,5 +108,5 @@ class WorkflowRunData(BaseModel):
 class WorkflowRunResponse(BaseModel):
     workflow_run_id: str
     task_id: str
-    mode: Literal["workflow"] = "workflow"  # echoed for CLI per-mode rendering — see endpoints.md L154
+    mode: Literal["workflow"] = "workflow"
     data: WorkflowRunData
