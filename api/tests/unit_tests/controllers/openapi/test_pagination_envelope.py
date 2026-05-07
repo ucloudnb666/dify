@@ -100,3 +100,19 @@ def test_app_describe_response_nests_info_and_parameters():
     dumped = obj.model_dump(mode="json")
     assert dumped["info"]["service_api_enabled"] is True
     assert dumped["parameters"]["opening_statement"] is None
+
+
+def test_response_models_dump_per_mode():
+    from controllers.openapi._models import (
+        ChatMessageResponse, CompletionMessageResponse, WorkflowRunResponse, WorkflowRunData,
+    )
+    chat = ChatMessageResponse(
+        event="message", task_id="t1", id="m1", message_id="m1",
+        conversation_id="c1", mode="chat", answer="hi", created_at=0,
+    )
+    assert chat.model_dump(mode="json")["mode"] == "chat"
+    wf = WorkflowRunResponse(
+        workflow_run_id="r1", task_id="t1",
+        data=WorkflowRunData(id="r1", workflow_id="w1", status="succeeded"),
+    )
+    assert wf.model_dump(mode="json")["data"]["status"] == "succeeded"

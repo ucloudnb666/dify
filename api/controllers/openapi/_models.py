@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Server-side cap on `limit` query param for any /openapi/v1/* list endpoint.
 # Sibling endpoints (`/apps`, `/account/sessions`, future routes) all clamp to
@@ -67,3 +67,46 @@ class AppDescribeResponse(BaseModel):
     info: AppDescribeInfo | None = None
     parameters: dict[str, Any] | None = None
     input_schema: dict[str, Any] | None = None
+
+
+class ChatMessageResponse(BaseModel):
+    event: str
+    task_id: str
+    id: str
+    message_id: str
+    conversation_id: str
+    mode: str
+    answer: str
+    metadata: MessageMetadata = Field(default_factory=MessageMetadata)
+    created_at: int
+
+
+class CompletionMessageResponse(BaseModel):
+    event: str
+    task_id: str
+    id: str
+    message_id: str
+    mode: str
+    answer: str
+    metadata: MessageMetadata = Field(default_factory=MessageMetadata)
+    created_at: int
+
+
+class WorkflowRunData(BaseModel):
+    id: str
+    workflow_id: str
+    status: str
+    outputs: dict[str, Any] = {}
+    error: str | None = None
+    elapsed_time: float | None = None
+    total_tokens: int | None = None
+    total_steps: int | None = None
+    created_at: int | None = None
+    finished_at: int | None = None
+
+
+class WorkflowRunResponse(BaseModel):
+    workflow_run_id: str
+    task_id: str
+    mode: str = "workflow"  # echoed for CLI per-mode rendering — see endpoints.md L154
+    data: WorkflowRunData
