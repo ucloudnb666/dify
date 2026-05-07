@@ -116,3 +116,9 @@ def test_response_models_dump_per_mode():
         data=WorkflowRunData(id="r1", workflow_id="w1", status="succeeded"),
     )
     assert wf.model_dump(mode="json")["data"]["status"] == "succeeded"
+    assert wf.model_dump(mode="json")["mode"] == "workflow"
+    comp = CompletionMessageResponse(
+        event="message", task_id="t2", id="m2", message_id="m2",
+        mode="completion", answer="ok", created_at=0,
+    )
+    assert comp.model_dump(mode="json")["mode"] == "completion"

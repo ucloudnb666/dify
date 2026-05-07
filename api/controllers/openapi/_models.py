@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -96,7 +96,7 @@ class WorkflowRunData(BaseModel):
     id: str
     workflow_id: str
     status: str
-    outputs: dict[str, Any] = {}
+    outputs: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     elapsed_time: float | None = None
     total_tokens: int | None = None
@@ -108,5 +108,5 @@ class WorkflowRunData(BaseModel):
 class WorkflowRunResponse(BaseModel):
     workflow_run_id: str
     task_id: str
-    mode: str = "workflow"  # echoed for CLI per-mode rendering — see endpoints.md L154
+    mode: Literal["workflow"] = "workflow"  # echoed for CLI per-mode rendering — see endpoints.md L154
     data: WorkflowRunData
