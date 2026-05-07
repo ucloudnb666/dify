@@ -51,7 +51,7 @@ def workspace_account(flask_app: Flask) -> Generator[tuple[Account, Tenant, Tena
 def app_in_workspace(flask_app: Flask, workspace_account) -> Generator[App, None, None]:
     _, tenant, _ = workspace_account
     with flask_app.app_context():
-        app = App(tenant_id=tenant.id, name="a", mode="chat", status="normal", enable_api=True)
+        app = App(tenant_id=tenant.id, name="a", mode="chat", status="normal", enable_site=True, enable_api=True)
         db.session.add(app)
         db.session.commit()
         yield app

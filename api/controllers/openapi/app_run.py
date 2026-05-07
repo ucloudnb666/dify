@@ -13,19 +13,26 @@ from collections.abc import Callable, Mapping
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, field_validator
+from flask import request
+from flask_restx import Resource
+from pydantic import BaseModel, ValidationError, field_validator
 from werkzeug.exceptions import BadRequest, InternalServerError, NotFound, UnprocessableEntity
 
 import services
+from controllers.openapi import openapi_ns
+from controllers.openapi._audit import emit_app_run
 from controllers.openapi._models import (
     ChatMessageResponse,
     CompletionMessageResponse,
     WorkflowRunResponse,
 )
+from controllers.openapi.auth.composition import OAUTH_BEARER_PIPELINE
 from controllers.service_api.app.error import (
     AppUnavailableError,
     CompletionRequestError,
     ConversationCompletedError,
+    NotChatAppError,
+    NotWorkflowAppError,
     ProviderModelCurrentlyNotSupportError,
     ProviderNotInitializeError,
     ProviderQuotaExceededError,
@@ -40,6 +47,7 @@ from core.errors.error import (
 from graphon.model_runtime.errors.invoke import InvokeError
 from libs import helper
 from libs.helper import UUIDStrOrEmpty
+from libs.oauth_bearer import Scope
 from models.model import App, AppMode
 from services.app_generate_service import AppGenerateService
 from services.errors.app import (
@@ -199,3 +207,40 @@ _DISPATCH: dict[AppMode, Callable[[App, Any, AppRunRequest, bool], tuple[Any, di
     AppMode.COMPLETION: _run_completion,
     AppMode.WORKFLOW: _run_workflow,
 }
+
+
+@openapi_ns.route("/apps/<string:app_id>/run")
+class AppRunApi(Resource):
+    @OAUTH_BEARER_PIPELINE.guard(scope=Scope.APPS_RUN)
+    def post(self, app_id: str, app_model: App, caller, caller_kind: str):
+        body = request.get_json(silent=True) or {}
+        body.pop("user", None)
+        try:
+            payload = AppRunRequest.model_validate(body)
+        except ValidationError as exc:
+            raise UnprocessableEntity(exc.json())
+
+        mode = AppMode.value_of(app_model.mode)
+        handler = _DISPATCH.get(mode)
+        if handler is None:
+            raise UnprocessableEntity("mode_not_runnable")
+
+        streaming = payload.response_mode == "streaming"
+        try:
+            stream_obj, blocking_body = handler(app_model, caller, payload, streaming)
+        except UnprocessableEntity:
+            raise
+        except (NotChatAppError, NotWorkflowAppError):
+            raise
+        except ValueError:
+            raise
+        except Exception:
+            logger.exception("internal server error.")
+            raise InternalServerError()
+
+        emit_app_run(app_id=app_model.id, tenant_id=app_model.tenant_id,
+                     caller_kind=caller_kind, mode=str(app_model.mode))
+
+        if streaming:
+            return helper.compact_generate_response(stream_obj)
+        return blocking_body, 200

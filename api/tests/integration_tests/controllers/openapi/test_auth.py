@@ -41,6 +41,7 @@ def other_workspace_app(flask_app: Flask) -> Generator[App, None, None]:
             name="b",
             mode="chat",
             status="normal",
+            enable_site=True,
             enable_api=True,
         )
         db.session.add(app)

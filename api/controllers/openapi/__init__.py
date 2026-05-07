@@ -18,6 +18,7 @@ openapi_ns = Namespace("openapi", description="User-scoped operations", path="/"
 
 from . import (
     account,
+    app_run,
     apps,
     apps_permitted,
     chat_messages,
@@ -31,6 +32,7 @@ from . import (
 
 __all__ = [
     "account",
+    "app_run",
     "apps",
     "apps_permitted",
     "chat_messages",
