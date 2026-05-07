@@ -220,19 +220,18 @@ class AppRunApi(Resource):
         except ValidationError as exc:
             raise UnprocessableEntity(exc.json())
 
-        mode = AppMode.value_of(app_model.mode)
+        mode = app_model.mode
         handler = _DISPATCH.get(mode)
         if handler is None:
             raise UnprocessableEntity("mode_not_runnable")
 
         streaming = payload.response_mode == "streaming"
+        # Preserve specific HTTPException codes that the catch-all would otherwise mask.
         try:
             stream_obj, blocking_body = handler(app_model, caller, payload, streaming)
         except UnprocessableEntity:
             raise
         except (NotChatAppError, NotWorkflowAppError):
-            raise
-        except ValueError:
             raise
         except Exception:
             logger.exception("internal server error.")
