@@ -8,6 +8,7 @@ from collections.abc import Generator
 import pytest
 from flask import Flask
 
+from core.app.entities.app_invoke_entities import InvokeFrom
 from extensions.ext_database import db
 from models import App
 
@@ -18,6 +19,7 @@ def test_run_chat_dispatches_to_chat_handler(flask_app, account_token, app_in_wo
     def _fake_generate(*, app_model, user, args, invoke_from, streaming):
         captured["mode"] = app_model.mode
         captured["args"] = args
+        captured["invoke_from"] = invoke_from
         return {
             "event": "message",
             "task_id": "t",
@@ -35,12 +37,14 @@ def test_run_chat_dispatches_to_chat_handler(flask_app, account_token, app_in_wo
     client = flask_app.test_client()
     res = client.post(
         f"/openapi/v1/apps/{app_in_workspace.id}/run",
-        json={"inputs": {}, "query": "hi", "response_mode": "blocking"},
+        json={"inputs": {}, "query": "hi", "response_mode": "blocking", "user": "spoof@x.com"},
         headers={"Authorization": f"Bearer {account_token}"},
     )
     assert res.status_code == 200
     assert res.get_json()["mode"] == "chat"
     assert captured["mode"] == "chat"
+    assert captured["invoke_from"] == InvokeFrom.OPENAPI
+    assert "user" not in captured["args"], "server must strip body.user; identity comes from bearer"
 
 
 @pytest.fixture
