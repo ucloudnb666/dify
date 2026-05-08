@@ -730,6 +730,22 @@ describe('AppCard', () => {
       })
     })
 
+    it('should call deleteApp API when pressing Enter in the delete confirmation input', async () => {
+      render(<AppCard app={mockApp} onRefresh={mockOnRefresh} />)
+
+      fireEvent.click(screen.getByTestId('dropdown-menu-trigger'))
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'common.operation.delete' }))
+      expect(await screen.findByRole('alertdialog')).toBeInTheDocument()
+
+      const deleteInput = screen.getByRole('textbox')
+      fireEvent.change(deleteInput, { target: { value: mockApp.name } })
+      fireEvent.keyDown(deleteInput, { key: 'Enter', code: 'Enter' })
+
+      await waitFor(() => {
+        expect(mockDeleteAppMutation).toHaveBeenCalled()
+      })
+    })
+
     it('should not call onRefresh after successful delete', async () => {
       render(<AppCard app={mockApp} onRefresh={mockOnRefresh} />)
 

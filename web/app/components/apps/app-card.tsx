@@ -250,13 +250,25 @@ const AppCard = ({ app, onlineUsers = [], onRefresh, onOpenTagManagement = () =>
 
   const isDeleteConfirmDisabled = isDeleting || confirmDeleteInput !== app.name
 
-  const onDeleteDialogSubmit: React.FormEventHandler<HTMLFormElement> = useCallback((e) => {
-    e.preventDefault()
+  const submitDeleteConfirmation = useCallback(() => {
     if (isDeleteConfirmDisabled)
       return
 
     void onConfirmDelete()
   }, [isDeleteConfirmDisabled, onConfirmDelete])
+
+  const onDeleteDialogSubmit: React.FormEventHandler<HTMLFormElement> = useCallback((e) => {
+    e.preventDefault()
+    submitDeleteConfirmation()
+  }, [submitDeleteConfirmation])
+
+  const onDeleteConfirmInputKeyDown: React.KeyboardEventHandler<HTMLInputElement> = useCallback((e) => {
+    if (e.key !== 'Enter' || e.nativeEvent.isComposing)
+      return
+
+    e.preventDefault()
+    submitDeleteConfirmation()
+  }, [submitDeleteConfirmation])
 
   const handleShowEditModal = useCallback(() => {
     setIsOperationsMenuOpen(false)
@@ -652,6 +664,7 @@ const AppCard = ({ app, onlineUsers = [], onRefresh, onOpenTagManagement = () =>
                   placeholder={t('deleteAppConfirmInputPlaceholder', { ns: 'app' })}
                   value={confirmDeleteInput}
                   onChange={e => setConfirmDeleteInput(e.target.value)}
+                  onKeyDown={onDeleteConfirmInputKeyDown}
                   className="border-components-input-border-hover bg-components-input-bg-normal focus:border-components-input-border-active focus:bg-components-input-bg-active"
                 />
               </div>
