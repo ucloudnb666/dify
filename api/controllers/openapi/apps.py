@@ -61,6 +61,19 @@ class AppDescribeQuery(BaseModel):
     fields: set[str] | None = None
     workspace_id: str | None = None
 
+    @field_validator("workspace_id", mode="before")
+    @classmethod
+    def _validate_workspace_id(cls, v: object) -> str | None:
+        if v is None or v == "":
+            return None
+        if not isinstance(v, str):
+            raise ValueError("workspace_id must be a string")
+        try:
+            _uuid.UUID(v)
+        except ValueError:
+            raise ValueError("workspace_id must be a valid UUID")
+        return v
+
     @field_validator("fields", mode="before")
     @classmethod
     def _parse_fields(cls, v: object) -> set[str] | None:
@@ -95,13 +108,14 @@ class AppReadResource(Resource):
             raise NotFound("app not found")
 
         try:
-            _uuid.UUID(app_id)
+            parsed_uuid = _uuid.UUID(app_id)
             is_uuid = True
         except ValueError:
+            parsed_uuid = None
             is_uuid = False
 
         if is_uuid:
-            app = db.session.get(App, app_id)
+            app = db.session.get(App, str(parsed_uuid))  # normalised dashed form
             if not app or app.status != "normal":
                 raise NotFound("app not found")
         else:
