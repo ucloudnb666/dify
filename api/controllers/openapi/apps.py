@@ -239,13 +239,6 @@ class AppListApi(Resource):
             200,
         )
 
-        tag_ids: list[str] | None = None
-        if query.tag:
-            tags = TagService.get_tag_by_tag_name("app", workspace_id, query.tag)
-            if not tags:
-                return empty
-            tag_ids = [tag.id for tag in tags]
-
         if query.name:
             try:
                 parsed_uuid = _uuid.UUID(query.name)
@@ -274,6 +267,13 @@ class AppListApi(Resource):
             )
             env = PaginationEnvelope[AppListRow].build(page=1, limit=1, total=1, items=[item])
             return env.model_dump(mode="json"), 200
+
+        tag_ids: list[str] | None = None
+        if query.tag:
+            tags = TagService.get_tag_by_tag_name("app", workspace_id, query.tag)
+            if not tags:
+                return empty
+            tag_ids = [tag.id for tag in tags]
 
         args: dict[str, Any] = {
             "page": query.page,
