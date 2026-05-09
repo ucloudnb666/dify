@@ -6,13 +6,14 @@ is last → outermost → sets `g.auth_ctx` before `require_scope` reads it.
 
 from __future__ import annotations
 
+import uuid as _uuid
 from typing import Any
 
 import sqlalchemy as sa
 from flask import g, request
 from flask_restx import Resource
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from werkzeug.exceptions import NotFound, UnprocessableEntity
+from werkzeug.exceptions import Conflict, NotFound, UnprocessableEntity
 
 from controllers.common.fields import Parameters
 from controllers.openapi import openapi_ns
@@ -58,6 +59,7 @@ class AppDescribeQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fields: set[str] | None = None
+    workspace_id: str | None = None
 
     @field_validator("fields", mode="before")
     @classmethod
@@ -87,15 +89,42 @@ class AppReadResource(Resource):
 
     method_decorators = _APPS_READ_DECORATORS
 
-    def _load(self, app_id: str) -> tuple[App, AuthContext]:
+    def _load(self, app_id: str, workspace_id: str | None = None) -> tuple[App, AuthContext]:
         ctx = g.auth_ctx
-        # Account-only; SSO subjects 404 (don't leak ID space).
         if ctx.subject_type != SubjectType.ACCOUNT or ctx.account_id is None:
             raise NotFound("app not found")
 
-        app = db.session.get(App, app_id)
-        if not app or app.status != "normal":
-            raise NotFound("app not found")
+        try:
+            _uuid.UUID(app_id)
+            is_uuid = True
+        except ValueError:
+            is_uuid = False
+
+        if is_uuid:
+            app = db.session.get(App, app_id)
+            if not app or app.status != "normal":
+                raise NotFound("app not found")
+        else:
+            if not workspace_id:
+                raise UnprocessableEntity("workspace_id is required for name-based lookup")
+            matches = list(
+                db.session.execute(
+                    sa.select(App).where(
+                        App.name == app_id,
+                        App.tenant_id == workspace_id,
+                        App.status == "normal",
+                    )
+                ).scalars()
+            )
+            if len(matches) == 0:
+                raise NotFound("app not found")
+            if len(matches) > 1:
+                lines = [f"app name {app_id!r} is ambiguous — re-run with a UUID:\n\n"]
+                lines.append(f"  {'ID':<36}  {'MODE':<12}  NAME\n")
+                for m in matches:
+                    lines.append(f"  {str(m.id):<36}  {str(m.mode.value):<12}  {m.name}\n")
+                raise Conflict("".join(lines))
+            app = matches[0]
 
         require_workspace_member(ctx, str(app.tenant_id))
         return app, ctx
@@ -111,12 +140,12 @@ def parameters_payload(app: App) -> dict:
 @openapi_ns.route("/apps/<string:app_id>/describe")
 class AppDescribeApi(AppReadResource):
     def get(self, app_id: str):
-        app, _ = self._load(app_id)
-
         try:
             query = AppDescribeQuery.model_validate(request.args.to_dict(flat=True))
         except ValidationError as exc:
             raise UnprocessableEntity(exc.json())
+
+        app, _ = self._load(app_id, workspace_id=query.workspace_id)
 
         requested = query.fields
         want_info = requested is None or "info" in requested
