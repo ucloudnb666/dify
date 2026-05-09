@@ -246,6 +246,35 @@ class AppListApi(Resource):
                 return empty
             tag_ids = [tag.id for tag in tags]
 
+        if query.name:
+            try:
+                parsed_uuid = _uuid.UUID(query.name)
+            except ValueError:
+                parsed_uuid = None
+        else:
+            parsed_uuid = None
+
+        if parsed_uuid is not None:
+            app = db.session.get(App, str(parsed_uuid))
+            if not app or app.status != "normal" or str(app.tenant_id) != workspace_id:
+                return empty
+            tenant_name = db.session.execute(
+                sa.select(Tenant.name).where(Tenant.id == workspace_id)
+            ).scalar_one_or_none()
+            item = AppListRow(
+                id=str(app.id),
+                name=app.name,
+                description=app.description,
+                mode=app.mode,
+                tags=[{"name": t.name} for t in app.tags],
+                updated_at=app.updated_at.isoformat() if app.updated_at else None,
+                created_by_name=getattr(app, "author_name", None),
+                workspace_id=str(workspace_id),
+                workspace_name=tenant_name,
+            )
+            env = PaginationEnvelope[AppListRow].build(page=1, limit=1, total=1, items=[item])
+            return env.model_dump(mode="json"), 200
+
         args: dict[str, Any] = {
             "page": query.page,
             "limit": query.limit,
